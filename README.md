@@ -7,6 +7,10 @@ what to inspect or improve, constraints to preserve, and how to check the result
 For example, “这个表格的展示方式不太好” can continue with requests to check column
 alignment, legibility, spacing, and whether important fields remain easy to find.
 Incomplete phrases with too little context still receive a short continuation.
+Greetings and openers such as “我希望你” wait for more input instead of borrowing
+a task from the conversation. A suggestion that substantially copies the draft,
+background, or writing instructions is retried once using the draft alone; edits
+cancel this retry too. Only the resulting new text can appear in the popup.
 
 The default backend is a local Ollama model. An OpenAI-compatible API is optional. This is an independent, unofficial companion; it does not use the Codex API or your Codex model quota.
 

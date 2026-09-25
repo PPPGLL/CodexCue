@@ -235,6 +235,25 @@ def main(argv=None) -> int:
                         wait_for(app, lambda: window.editor.text() == draft + suffix, "live suffix native paste")
                         check("live_model_paste_does_not_send", window.submissions == 0)
                         QTest.qWait(300)  # Let the production clipboard restoration finish.
+                # Reuse the actual packaged backend with adversarial synthetic
+                # history, so semantic regression is checked beyond text length.
+                from .quality_checks import check_context_grounding
+                quality_results = []
+                quality_errors = []
+                quality_done = threading.Event()
+                def check_quality():
+                    try:
+                        quality_results.extend(check_context_grounding(companion.backend))
+                    except Exception as exc:
+                        quality_errors.append(type(exc).__name__)
+                    finally:
+                        quality_done.set()
+                threading.Thread(target=check_quality, daemon=True).start()
+                wait_for(app, quality_done.is_set, "quoted-rule model regressions", timeout=40)
+                report["context_grounding_results"] = quality_results
+                check("quoted_rules_do_not_become_suggestions", not quality_errors and len(quality_results) == 7
+                      and all(row["status"] == "PASS" for row in quality_results))
+
                 # Verify the actual server unloads this model after idle and on
                 # explicit release; no model is installed or downloaded here.
                 companion.backend.keep_alive_seconds = 1

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep writing rules and earlier conversation from becoming the suggestion;
+  retry substantial copied text once using the unchanged draft alone.
+- Wait for more input after greetings and subjectless openers. Add live-model
+  regressions with deliberately misleading quoted completion instructions.
 - Expand rough revision requests into relevant details and checks while keeping
   incomplete phrases concise and respecting analysis-only instructions.
 - Increase generation capacity, preserve complete requirements beyond 120
