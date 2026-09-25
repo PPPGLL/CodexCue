@@ -101,9 +101,11 @@ def test_only_typed_user_and_final_assistant_turns_reach_both_models(tmp_path):
         cloud.close()
 
     prompt = captured["ollama"]["prompt"]
-    assert prompt.count("<|im_start|>user\n") == 5  # 4 history turns and the draft.
+    assert prompt.count("<|im_start|>user\n") == 1
     assert prompt.count("<|im_start|>assistant\n") == 1
-    assert prompt.endswith("<|im_start|>user\n请继续")
+    assert prompt.endswith("草稿：请继续<|im_end|>\n<|im_start|>assistant\n")
+    for item in expected:
+        assert f"{item.role}: {item.text}" in prompt
     cloud_history = captured["cloud"]["messages"][1:-1]
     assert cloud_history == [{"role": item.role, "content": item.text} for item in expected]
     for unwanted in ("RUNTIME_", "REVIEW_TRANSCRIPT", "REVIEW_MULTIPART",

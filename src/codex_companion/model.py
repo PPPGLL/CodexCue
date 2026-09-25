@@ -26,59 +26,31 @@ class SuggestionBackend(Protocol):
 
 
 SYSTEM_PROMPT = (
-    "你是输入框续写器。根据之前的对话，续写用户正在输入给助手的消息。"
-    "优先承接最近对话中的具体对象、约束和未解决的问题；草稿换了话题时以草稿为准。"
-    "只生成接在草稿末尾的文字；回答的第一个字就是续写的第一个字。"
-    "只补全一个短语或分句，最多20个汉字。绝不输出草稿、标签、引号、解释、换行或重复句子。"
-    "不要替助手回答问题；如果草稿像完整句子，继续写一个相关的具体要求。"
-)
-
-COMPLETION_PROMPT = (
-    "你在补全用户尚未发送的输入内容。先看最近的用户消息和助手最终回复，"
-    "优先承接其中的具体对象、约束和未解决的问题；若草稿转了话题，就以草稿为准。"
-    "继续最后一条未结束的 user 消息，保持用户语气。"
-    "只续写一个短语或分句，最多20个汉字；草稿像完整句子时也可补一小段相关要求。"
-    "不要回答用户，不要重复草稿或续写过的内容。/no_think"
-)
-
-FOLLOWUP_PROMPT = (
-    "你正在替用户本人续写给助手的输入。根据最近对话，只输出应追加在草稿末尾的文字，"
-    "保持用户的请求语气；不要作为助手回答或反问用户，不要称用户为‘您’。"
-    "不要重复草稿或虚构已发生的事实。草稿已带标点时，直接续写一小段相关的具体要求；"
-    "草稿没有标点时，可以先补合适的标点。不要只输出标点。"
-    "最多20个汉字，不要标签、解释、引号或换行。"
-    "例如草稿‘为什么点击后没有反应？’可续写‘请帮我排查点击事件是否触发’。"
+    "你正在续写用户本人尚未发送的消息。你是这段文字的作者，不是回答它的助手。"
+    "历史对话只用于理解指代和主题；当前草稿优先，不从历史中虚构新要求或事实。"
+    "只输出能直接接在草稿末尾的最短自然后缀，保持语言、语气和标点。"
+    "优先补完当前短语或句子，不主动另起一句；已经完整且无需续写时输出空内容。"
+    "不要重复草稿，不要标签、引号、解释、换行，也不要回答草稿里的问题。"
+    "\n示例：草稿：请把插入快捷键改成；续写：Tab"
+    "\n示例：草稿：补全框应该只显示；续写：需要追加的文字"
 )
 
 
 def build_completion_prompt(request: SuggestionRequest) -> str:
-    """Leave the last user turn open so the model continues its text, not answers it."""
+    """Give Qwen a suffix-only answer slot instead of an open conversation turn."""
     def safe(value: str) -> str:
         return value.replace("<|", "< |")
 
-    parts = [f"<|im_start|>system\n{COMPLETION_PROMPT}<|im_end|>"]
-    for message in request.messages:
-        if message.text.strip():
-            parts.append(f"<|im_start|>{message.role}\n{safe(message.text)}<|im_end|>")
-    parts.append(f"<|im_start|>user\n{safe(request.draft)}")
-    return "\n".join(parts)
-
-
-def build_followup_prompt(request: SuggestionRequest, ending: str) -> str:
-    """Ask for a useful suffix when open-turn completion ended at punctuation."""
-    def safe(value: str) -> str:
-        return value.replace("<|", "< |")
-
-    parts = [f"<|im_start|>system\n{FOLLOWUP_PROMPT}<|im_end|>"]
-    for message in request.messages:
-        if message.text.strip():
-            parts.append(f"<|im_start|>{message.role}\n{safe(message.text)}<|im_end|>")
-    parts.append(
-        f"<|im_start|>user\n草稿：{safe(request.draft + ending)}\n"
-        "只输出继续追加在草稿末尾的文字。<|im_end|>"
+    history = "\n".join(
+        f"{message.role}: {safe(message.text)}"
+        for message in request.messages if message.text.strip()
     )
-    parts.append("<|im_start|>assistant\n")
-    return "\n".join(parts)
+    return (
+        f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+        f"<|im_start|>user\n<历史对话>\n{history}\n</历史对话>\n"
+        f"请续写当前草稿，只输出后缀。\n草稿：{safe(request.draft[-1000:])}"
+        "<|im_end|>\n<|im_start|>assistant\n"
+    )
 
 
 def build_messages(request: SuggestionRequest) -> list[dict[str, str]]:
@@ -88,26 +60,17 @@ def build_messages(request: SuggestionRequest) -> list[dict[str, str]]:
         if message.text.strip()
     ]
     draft = request.draft[-1000:]
-    if draft:
-        instruction = f"草稿：{draft}\n续写："
-    else:
-        instruction = "草稿为空。直接写一条简短的用户消息。"
+    instruction = f"请续写当前草稿，只输出后缀。\n草稿：{draft}\n续写："
     return [{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": instruction}]
-
-
-def build_followup_messages(request: SuggestionRequest, ending: str) -> list[dict[str, str]]:
-    messages = build_messages(SuggestionRequest(request.messages, request.draft + ending))
-    messages[0] = {"role": "system", "content": FOLLOWUP_PROMPT}
-    return messages
 
 
 def normalize_suggestion(raw: str, draft: str, limit: int = 120) -> str:
     if "<think>" in raw and "</think>" not in raw:
         return ""
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-    raw = raw.strip().splitlines()[0] if raw.strip() else ""
-    raw = re.sub(r"^(?:[-*•]\s*|\d+[.)、]\s*)", "", raw).strip()
-    raw = raw.strip(" \t\"'“”‘’")
+    raw = raw.splitlines()[0].rstrip() if raw.strip() else ""
+    raw = re.sub(r"^(?:[-*•]\s*|\d+[.)、]\s*)", "", raw)
+    raw = raw.strip("\"'“”‘’")
     if draft and raw.startswith(draft):
         raw = raw[len(draft) :]
     elif draft and draft.startswith(raw):
@@ -126,10 +89,6 @@ def readable(text: str, final: bool = False) -> bool:
     if final:
         return True
     return len(text.strip()) >= 4
-
-
-def punctuation_only(text: str) -> bool:
-    return bool(text) and all(char in "。！？!?，,；;：:.…" for char in text)
 
 
 def _local_url(base_url: str) -> str:
@@ -190,8 +149,7 @@ class OllamaBackend:
             return ""
         qwen = self._uses_qwen_prompt()
 
-        def generate(prompt: str | list[dict[str, str]], draft: str,
-                     stream_updates: bool) -> str:
+        def generate(prompt: str | list[dict[str, str]], draft: str) -> str:
             payload = {"model": self.model, "stream": True, "keep_alive": -1,
                        "think": False,
                        "options": {"temperature": 0.2, "num_predict": 24, "num_ctx": 3072,
@@ -217,32 +175,20 @@ class OllamaBackend:
                     else:
                         raw += chunk.get("message", {}).get("content", "")
                     current = normalize_suggestion(raw, draft)
-                    if (stream_updates and current != shown and readable(current)
-                            and not punctuation_only(current)):
+                    if current != shown and readable(current):
                         shown = current
                         emit(current)
                     if chunk.get("done"):
                         break
-            return normalize_suggestion(raw, draft)
+            final = normalize_suggestion(raw, draft)
+            if final != shown and readable(final, final=True):
+                emit(final)
+            return final
 
-        first_prompt = build_completion_prompt(request) if qwen else build_messages(request)
-        first = generate(first_prompt, request.draft, True)
+        prompt = build_completion_prompt(request) if qwen else build_messages(request)
+        final = generate(prompt, request.draft)
         if cancel.is_set():
             return ""
-        if not first or punctuation_only(first):
-            ending = first if punctuation_only(first) else ""
-            followup_prompt = (build_followup_prompt(request, ending) if qwen else
-                               build_followup_messages(request, ending))
-            followup = generate(followup_prompt, request.draft + ending, False)
-            if cancel.is_set():
-                return ""
-            if ending and followup.startswith(ending):
-                followup = followup[len(ending):]
-            final = ending + followup if followup and not punctuation_only(followup) else ""
-        else:
-            final = first
-        if readable(final, final=True):
-            emit(final)
         return final
 
     def close(self) -> None:

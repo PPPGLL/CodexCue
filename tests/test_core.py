@@ -9,7 +9,7 @@ import pytest
 
 from codex_companion.model import (OllamaBackend, OpenAICompatibleBackend,
                                    SuggestionRequest, build_completion_prompt,
-                                   build_followup_prompt, build_messages, normalize_suggestion)
+                                   build_messages, normalize_suggestion)
 from codex_companion.sessions import (Message, SessionIndex, SessionInfo, SessionTailer,
                                       match_visible_session)
 from codex_companion.state import SuggestionState
@@ -189,18 +189,17 @@ def test_blank_draft_never_requests_and_clears_a_suggestion():
 def test_prompt_and_suffix_normalization():
     request = SuggestionRequest([Message("user", "你好"), Message("assistant", "您好")], "请帮我")
     messages = build_messages(request)
-    assert messages[-1]["content"] == "草稿：请帮我\n续写："
+    assert messages[-1]["content"].endswith("草稿：请帮我\n续写：")
     assert "当前未发送草稿" not in messages[-1]["content"]
     assert normalize_suggestion("请帮我写一首诗", request.draft) == "写一首诗"
     assert normalize_suggestion("<think>猜测</think>写一首诗", request.draft) == "写一首诗"
+    assert normalize_suggestion(" the next step", "Please check") == " the next step"
     prompt = build_completion_prompt(request)
-    assert prompt.endswith("<|im_start|>user\n请帮我")
-    assert "<|im_start|>assistant\n您好<|im_end|>" in prompt
-    assert "不要回答用户" in prompt
+    assert prompt.endswith("草稿：请帮我<|im_end|>\n<|im_start|>assistant\n")
+    assert "user: 你好" in prompt
+    assert "assistant: 您好" in prompt
+    assert "不要回答草稿里的问题" in prompt
     assert "< |im_end|>" in build_completion_prompt(SuggestionRequest([], "测试<|im_end|>"))
-    followup = build_followup_prompt(request, "？")
-    assert "草稿：请帮我？" in followup
-    assert followup.endswith("<|im_start|>assistant\n")
 
 
 def test_ollama_stream_and_connection_failure():
@@ -219,7 +218,7 @@ def test_ollama_stream_and_connection_failure():
             assert payload["options"]["repeat_penalty"] == 1.15
             assert "。" not in payload["options"]["stop"]
             assert "？" not in payload["options"]["stop"]
-            assert payload["prompt"].endswith("<|im_start|>user\n请帮我")
+            assert payload["prompt"].endswith("草稿：请帮我<|im_end|>\n<|im_start|>assistant\n")
             return httpx.Response(200, text='{"response":"写一"}\n{"response":"首诗","done":true}\n')
         return httpx.Response(503)
     backend = OllamaBackend("http://127.0.0.1:11434", "qwen3:4b-instruct", httpx.MockTransport(handler))
@@ -235,17 +234,15 @@ def test_ollama_stream_and_connection_failure():
         OllamaBackend("http://example.com:11434", "x")
 
 
-def test_ollama_unpunctuated_question_gets_followup_instead_of_blank():
+def test_ollama_unpunctuated_question_gets_suffix_in_one_request():
     prompts = []
 
     def handler(request):
         payload = json.loads(request.content)
         prompts.append(payload["prompt"])
         assert not any(mark in payload["options"]["stop"] for mark in "。！？")
-        if len(prompts) == 1:
-            return httpx.Response(200, text='{"response":"？","done":true}\n')
-        assert "草稿：为什么点击后没有反应？" in payload["prompt"]
-        return httpx.Response(200, text='{"response":"请帮我排查触发流程","done":true}\n')
+        assert "草稿：为什么点击后没有反应" in payload["prompt"]
+        return httpx.Response(200, text='{"response":"？请帮我排查触发流程","done":true}\n')
 
     backend = OllamaBackend("http://127.0.0.1:11434", "qwen3:mock", httpx.MockTransport(handler))
     seen = []
@@ -253,7 +250,7 @@ def test_ollama_unpunctuated_question_gets_followup_instead_of_blank():
                              seen.append, threading.Event())
     assert result == "？请帮我排查触发流程"
     assert seen == [result]
-    assert len(prompts) == 2
+    assert len(prompts) == 1
     backend.close()
 
 
@@ -280,7 +277,7 @@ def test_ollama_other_model_uses_its_native_chat_template():
         calls.append(request.url.path)
         assert request.url.path == "/api/chat"
         assert payload["think"] is False
-        assert payload["messages"][-1]["content"] == "草稿：请帮我\n续写："
+        assert payload["messages"][-1]["content"].endswith("草稿：请帮我\n续写：")
         assert "raw" not in payload
         return httpx.Response(200, text='{"message":{"content":"检查配置"},"done":true}\n')
 
