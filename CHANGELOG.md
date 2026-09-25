@@ -1,36 +1,27 @@
-# Changelog
+# 更新记录
 
-## Unreleased
+## 0.1.0b2
 
-- Keep writing rules and earlier conversation from becoming the suggestion;
-  retry substantial copied text once using the unchanged draft alone.
-- Wait for more input after greetings and subjectless openers. Add live-model
-  regressions with deliberately misleading quoted completion instructions.
-- Expand rough revision requests into relevant details and checks while keeping
-  incomplete phrases concise and respecting analysis-only instructions.
-- Increase generation capacity, preserve complete requirements beyond 120
-  characters, and widen the popup for longer suggestions.
-- Cover long streamed suggestions, native insertion, and detailed live-model
-  requests in automated acceptance.
+- 改为单次请求的自适应续写，统一提示词自然决定长短；粗略意见可补充具体要求，通常约 80–160 字。
+- 保留短句补全；问候和模糊开头也会尝试猜测后续，合理建议由用户决定是否采用。
+- 未写完的短语和疑问句优先续完原句，避免把“的”“应该”等句尾直接接成一段详细要求。
+- 隔离历史里的生成规则；格式错误、空结果或复制内容最多修复一次，取消和超时覆盖整个请求。
+- 保持“只分析、先不修改”等明确限制，旧结果不影响新草稿。
+- 移除弹窗类型说明、设置中的补全方式和上下文方式；自动使用已确认对话，无法确认时直接续写草稿。
+- 加宽较长建议的弹窗，完整显示待插入文字。
+- 扩展两种后端的路由、取消、总超时、设置迁移，以及真实模型和原生插入回归。
+- 重写中文 README，加入支持减少动态效果的补全示意动画；补充开发、更新、回退和发布验收指南。
 
 ## 0.1.0b1
 
-First Beta release preparation for Windows x64.
+首个 Windows x64 Beta 候选。
 
-- Continue drafts using an anchored structured response; preserve numbers,
-  whitespace and partial words, and keep historical dialogue as quoted context.
-- Recognize short task titles and cold-start composers. Automatic mode uses only
-  the draft when task identity cannot be verified; strict context mode is optional.
-- Cancel stale requests, suppress late output after navigation/submission, show
-  the full inserted suffix, and release idle local models.
-- Recover native settings, dropdown and suggestion visibility after hidden
-  script launches. Add repeated startup and real-model desktop acceptance.
-- Preserve corrupt configuration and open recovery settings; allow download
-  retries after process-start failure and archive corruption.
-- Add verified per-user installation, upgrade rollback, safe uninstall, release
-  checksums, version/source provenance and third-party license/source assets.
+- 使用结构化续写保留草稿、数字、空格和未完成的词；历史对话作为引用背景。
+- 支持短标题、冷启动输入框识别；自动上下文在任务未识别时使用草稿，并提供严格匹配选项。
+- 取消过期请求，阻止导航或发送后的旧输出，完整显示插入内容，释放空闲模型。
+- 修复隐藏脚本启动后的设置、下拉框与建议可见性，增加重复启动和真实模型桌面验收。
+- 损坏配置保留备份并进入恢复流程；保存失败保留运行状态，下载和进程启动失败可以重试。
+- 增加校验下载、每用户安装、升级回退、安全卸载、版本与源码追溯、校验和与许可证资源。
+- 增加干净 Windows CI、草稿发布流程及隔离用户数据的自动化测试。
 
-Known boundaries: VS Code support is experimental; test fixtures do not certify
-every host version or IME. The Windows binary is unsigned. Automatic application
-updates and startup registration are not included. Models can still produce
-unhelpful suggestions; Tab is always optional and never sends a message.
+Beta 边界：VS Code 为实验支持；Windows 包尚未签名；宿主版本、输入法与硬件兼容范围按实际验收记录说明。更新采用版本包安装流程。补全由模型生成，是否采用和发送始终由用户决定。

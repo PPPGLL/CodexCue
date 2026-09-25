@@ -73,8 +73,6 @@ class AppConfig:
     cloud_base_url: str = ""
     cloud_model: str = ""
     enabled: bool = True
-    completion_mode: str = "auto"
-    completion_style: str = "auto"
     model_idle_seconds: int = 60
     request_timeout_seconds: float = 8.0
 
@@ -99,8 +97,6 @@ class AppConfig:
                     raise ValueError("Invalid configuration field type")
             result = cls(**values)
             if (result.backend not in {"ollama", "cloud"}
-                    or result.completion_mode not in {"auto", "context", "draft"}
-                    or result.completion_style not in {"auto", "short"}
                     or not 0 <= result.model_idle_seconds <= 3600
                     or not 0 < result.request_timeout_seconds <= 120):
                 raise ValueError("Invalid configuration value")

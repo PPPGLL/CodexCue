@@ -13,6 +13,7 @@ from pathlib import Path
 
 from codex_companion.config import DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL
 from codex_companion.model import OllamaBackend, SuggestionRequest
+from codex_companion import model as completion_model
 from codex_companion.sessions import Message
 
 
@@ -57,6 +58,10 @@ CASES = [
     ("quotes", [], '请检查 config["rate"] 的'),
     ("multiline", [], "先检查初始化。\n然后帮我确认"),
     ("unicode", [], "界面上的 🔥 图标应该"),
+    ("vague_guess", [], "要不"),
+    ("layout_details", [], "侧栏和正文挤在一起，看着很累"),
+    ("workflow_details", [], "选择文件到开始上传之间要来回点，理顺一下"),
+    ("result_details", [], "转换后的内容有没有遗漏不好确认，改善一下"),
 ]
 
 
@@ -68,11 +73,21 @@ def main() -> int:
     args = parser.parse_args()
     backend = OllamaBackend(args.url, args.model)
     results = []
+    original_complete = completion_model.complete_request
+    request_count = 0
+    async def counted_complete(read, request):
+        async def counted_read(*args):
+            nonlocal request_count
+            request_count += 1
+            return await read(*args)
+        return await original_complete(counted_read, request)
+    completion_model.complete_request = counted_complete
     try:
         if not backend.available()[1]:
             parser.error("selected model is not installed")
         backend.warm()
         for name, history, draft in CASES:
+            request_count = 0
             started = time.perf_counter()
             error = None
             try:
@@ -83,12 +98,14 @@ def main() -> int:
                 suffix, error = "", str(exc)
             row = {"case": name, "draft": draft, "suffix": suffix,
                    "combined": draft + suffix,
+                   "generation_requests": request_count,
                    "backend_ms": round((time.perf_counter() - started) * 1000)}
             if error:
                 row["error"] = error
             results.append(row)
             print(json.dumps(row, ensure_ascii=True), flush=True)
     finally:
+        completion_model.complete_request = original_complete
         backend.close()
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -81,14 +81,8 @@ class ModelHandler(BaseHTTPRequestHandler):
             self.server.requests.append(json.loads(payload["messages"][-1]["content"]))
             self.server.release.wait(5)
         data = json.loads(payload["messages"][-1]["content"]) if payload.get("messages") else {"anchor": ""}
-        fields = payload.get("format", {}).get("properties", {})
-        if "mode" in fields:
-            result = ({"mode": "check", "focus": "页面", "evidence": "行间距看起来不一致"}
-                      if data["draft"] == DETAIL_DRAFT else {"mode": "short", "focus": "", "evidence": ""})
-        elif "requirements" in fields:
-            result = {"requirements": DETAIL_ITEMS}
-        else:
-            result = {"continuation": data["anchor"] + SUFFIX}
+        suffix = "。" + "".join(DETAIL_ITEMS) if data.get("draft") == DETAIL_DRAFT else SUFFIX
+        result = {"continuation": data["anchor"] + suffix}
         body = json.dumps({"message": {"content": json.dumps(result)}, "done": True}).encode() + b"\n"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
@@ -207,21 +201,20 @@ def main(argv=None) -> int:
                      "isolated fixture foreground (no input was sent elsewhere)", timeout=15)
             companion = Companion(app, AppConfig(
                 ollama_url=args.ollama_url if args.live_model else f"http://127.0.0.1:{server.server_port}",
-                ollama_model=args.live_model or "qa-fixture:1", completion_mode="context"))
+                ollama_model=args.live_model or "qa-fixture:1"))
             wait_for(app, lambda: companion.ready, "model ready", timeout=90 if args.live_model else 5)
             wait_for(app, lambda: companion.context_verified, "cold start focused composer recognition")
             check("cold_start_blank_no_request", not server.requests and not companion.popup.isVisible())
             check("cold_start_session_alpha", companion.tailer.path.name == "rollout-alpha.jsonl")
 
             if args.live_model:
-                companion.config.completion_mode = "draft"
                 report["model"] = args.live_model
                 report["model_results"] = []
                 drafts = ["先不要修改文件，请先", "Please inspect the configu", "这个函数的返回值应该",
                           "帮我比较这两个实现的", "Before running the tests, please", "这个问题解决了吗？",
                           "我觉得", "你好"]
-                detailed_drafts = {"这个表格的展示方式不太好": "check", "导出的时候总是不知道有没有成功，改一下": "acceptance",
-                                   "先不要动代码，帮我看看这个登录流程有什么问题": "optimize"}
+                detailed_drafts = {"这个表格的展示方式不太好", "导出的时候总是不知道有没有成功，改一下",
+                                   "先不要动代码，帮我看看这个登录流程有什么问题"}
                 drafts.extend(detailed_drafts)
                 for draft in drafts:
                     began = time.monotonic()
@@ -230,8 +223,6 @@ def main(argv=None) -> int:
                              and companion.state.active is None, "real model completed", timeout=10)
                     suffix = companion.state.suggestion
                     row = {"draft": draft, "suffix": suffix, "combined": draft + suffix,
-                           "kind": getattr(suffix, "kind", ""),
-                           "requirements": len(getattr(suffix, "requirements", ())),
                            "end_to_end_ms": round((time.monotonic() - began) * 1000),
                            "shown": companion.popup.isVisible()}
                     report["model_results"].append(row)
@@ -239,10 +230,10 @@ def main(argv=None) -> int:
                         check("complete_question_has_no_continuation", not suffix and not companion.popup.isVisible())
                     else:
                         check("live_model_suffix_visible", bool(suffix) and companion.can_accept_tab())
+                        check("live_model_keeps_user_voice", not any(text in suffix for text in
+                              ("有什么我可以帮", "我可以帮你", "好的，我会", "我来帮你")))
                         if draft in detailed_drafts:
-                            check("rough_request_expanded", 80 <= len(suffix) <= 160)
-                            check("correct_detailed_mode", getattr(suffix, "kind", "") == detailed_drafts[draft])
-                            check("two_to_four_requirements", 2 <= len(getattr(suffix, "requirements", ())) <= 4)
+                            check("rough_request_expanded", 60 <= len(suffix) <= 180)
                             check("details_finish_a_sentence", suffix.endswith(("。", ".", "？", "?", "！", "!")))
                             check("details_do_not_invent_numbers", not any(c.isdigit() for c in suffix))
                         if draft.startswith("先不要动代码"):
@@ -267,7 +258,7 @@ def main(argv=None) -> int:
                 threading.Thread(target=check_quality, daemon=True).start()
                 wait_for(app, quality_done.is_set, "quoted-rule model regressions", timeout=40)
                 report["context_grounding_results"] = quality_results
-                check("quoted_rules_do_not_become_suggestions", not quality_errors and len(quality_results) == 9
+                check("quoted_rules_do_not_become_suggestions", not quality_errors and len(quality_results) == 13
                       and all(row["status"] == "PASS" for row in quality_results))
 
                 # Verify the actual server unloads this model after idle and on
@@ -336,12 +327,11 @@ def main(argv=None) -> int:
                   for m in server.requests[-1]["background"]))
 
             write_fixture(home, "collision", TITLE_B)
-            request_count = len(server.requests)
             companion.note_navigation()
             type_draft("Compare again")
             wait_for(app, lambda: companion.context_resolution_state == "unresolved", "ambiguous title rejected")
-            check("ambiguous_title_no_suggestion", not companion.can_accept_tab() and not companion.popup.isVisible())
-            check("ambiguous_title_no_request", len(server.requests) == request_count)
+            wait_for(app, lambda: companion.can_accept_tab(), "ambiguous task draft-only continuation")
+            check("ambiguous_title_no_old_history", server.requests[-1]["background"] == [])
 
             window.title.setText(TITLE_A)
             companion.note_navigation()
@@ -366,24 +356,23 @@ def main(argv=None) -> int:
             check("cancelled_http_does_not_block_new_draft", time.monotonic() - started < 2 and not held.is_set())
             held.set()
 
-            # A missing/ambiguous history becomes explicitly draft-only in auto
-            # mode; the strict-mode rejection above remains independently tested.
-            companion.config.completion_mode = "auto"
+            # Missing history always falls back to the current draft.
             window.title.setText("A brand new unsaved task")
             companion.note_navigation()
             type_draft("Please help me with")
             wait_for(app, lambda: companion.can_accept_tab(), "new task without history")
             check("draft_only_has_no_old_history", server.requests[-1]["background"] == [])
-            check("draft_only_scope_is_visible", companion.popup.scope_hint.isVisible())
+            check("popup_has_only_suggestion_and_tab", [label.text() for label in companion.popup.findChildren(QLabel)]
+                  == [companion.state.suggestion, "Tab"])
 
             type_draft(DETAIL_DRAFT)
-            wait_for(app, lambda: companion.can_accept_tab(), "routed detailed suggestion")
+            wait_for(app, lambda: companion.can_accept_tab(), "adaptive detailed suggestion")
             detailed = companion.state.suggestion
-            check("mode_metadata_survives_worker_signal", getattr(detailed, "kind", "") == "check")
+            check("single_request_for_details", sum(r["draft"] == DETAIL_DRAFT for r in server.requests) == 1)
             check("detailed_popup_not_clipped", companion.popup.label.text() == detailed and 80 <= len(detailed) <= 160)
             check("detailed_tab_consumed", key(0x09) == 1)
             wait_for(app, lambda: window.editor.text() == DETAIL_DRAFT + detailed, "detailed native paste")
-            check("badge_not_inserted", window.editor.text() == DETAIL_DRAFT + detailed)
+            check("only_suggestion_inserted", window.editor.text() == DETAIL_DRAFT + detailed)
             QTest.qWait(300)
 
             window.showMaximized()

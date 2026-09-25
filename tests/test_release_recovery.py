@@ -10,7 +10,7 @@ from codex_companion.config import AppConfig
 
 @pytest.mark.parametrize("contents", [b'{"enabled":', b'[]', b'\xff',
     b'{"enabled":"false"}', b'{"model_idle_seconds":-1}',
-    b'{"completion_mode":"typo"}', b'{"request_timeout_seconds":NaN}'])
+    b'{"backend":"typo"}', b'{"request_timeout_seconds":NaN}'])
 def test_corrupt_config_is_preserved_and_recovery_pauses_completion(tmp_path, contents):
     path = tmp_path / "config.json"
     path.write_bytes(contents)

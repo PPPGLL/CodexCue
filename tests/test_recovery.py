@@ -128,19 +128,16 @@ def test_maximized_fallback_popup_stays_on_screen():
     assert Screen().availableGeometry().contains(QRect(point.x(), point.y(), 338, 80))
 
 
-@pytest.mark.parametrize("mode, expected", [("auto", []), ("draft", []), ("context", None)])
-def test_unidentified_task_never_reuses_previous_history(mode, expected):
+def test_unidentified_task_never_reuses_previous_history():
     companion = controller()
-    companion.config.completion_mode = mode
     companion.context_verified = False
     companion.context_messages = [Message("user", "previous private task")]
-    assert companion.completion_context() == expected
+    assert companion.completion_context() == []
 
 
 def test_first_message_can_complete_without_a_session(monkeypatch):
     from codex_companion import windows_input
     companion = controller()
-    companion.config.completion_mode = "auto"
     companion.tailer = None
     companion.context_ready = companion.context_verified = False
     companion.context_messages = [Message("user", "must not leak")]
@@ -204,7 +201,6 @@ def test_completed_question_does_not_call_model():
 def test_throttled_new_window_cannot_reuse_verified_old_history(monkeypatch):
     from codex_companion import windows_input
     companion = controller()
-    companion.config.completion_mode = "auto"
     companion.last_resolution_attempt_at = time.monotonic()
     monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 999)
     companion.note_typing()

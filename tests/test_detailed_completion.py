@@ -25,20 +25,14 @@ def test_both_backends_preserve_a_complete_detailed_request(cloud):
               "Show which values need attention and keep the entered values when validation fails. "
               "Check that the form still submits successfully after correcting an invalid field.")
     assert 120 < len(suffix) < MAX_SUGGESTION_CHARS
-    requirements = ["Clarify the labels and group related fields together.",
-                    "Show which values need attention and keep the entered values when validation fails.",
-                    "Check that the form still submits successfully after correcting an invalid field."]
     calls = []
 
     def handler(request):
         body = json.loads(request.content)
         calls.append(body)
         budget = body["max_tokens"] if cloud else body["options"]["num_predict"]
-        if len(calls) == 1:
-            raw = json.dumps({"mode": "optimize", "focus": "form", "evidence": "improve this form"})
-        else:
-            assert budget >= 384
-            raw = json.dumps({"requirements": requirements})
+        assert budget >= 384
+        raw = json.dumps({"continuation": draft_anchor(draft) + suffix})
         pieces = [raw[:55], raw[55:130], raw[130:]]
         if cloud:
             text = "".join("data: " + json.dumps({"choices": [{"delta": {"content": part}}]})
@@ -53,9 +47,9 @@ def test_both_backends_preserve_a_complete_detailed_request(cloud):
                if cloud else OllamaBackend("http://127.0.0.1:11434", "fixture", transport))
     emitted = []
     try:
-        result = backend.suggest(SuggestionRequest([], draft, "auto"), emitted.append, threading.Event())
+        result = backend.suggest(SuggestionRequest([], draft), emitted.append, threading.Event())
         assert result == suffix
-        assert result.kind == "optimize" and len(calls) == 2
+        assert len(calls) == 1
         assert emitted == [suffix]  # No JSON fragments or incomplete clauses.
     finally:
         backend.close()
@@ -131,7 +125,7 @@ def test_openers_do_not_turn_background_into_a_task(cloud):
             emitted = []
             assert backend.suggest(SuggestionRequest([Message("assistant", "Earlier instructions")], draft),
                                    emitted.append, threading.Event()) == "，请帮我看看。"
-            assert len(emitted) == 1 and emitted[0].kind == "short"
+            assert len(emitted) == 1
     finally:
         backend.close()
 

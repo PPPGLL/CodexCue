@@ -12,11 +12,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import AppConfig, get_cloud_key
-from .completion_modes import (CompletionRoute, SuggestionText, SHORT_PROMPT,
-                               ROUTE_PROMPT, ROUTE_EXAMPLES, ROUTE_SCHEMA,
-                               DETAIL_COMMON, DETAIL_PROMPTS, DETAIL_EXAMPLES, REQUIREMENTS_SCHEMA,
-                               ANALYSIS_ONLY_PROMPT, ANALYSIS_EXAMPLES, analysis_only,
-                               parse_route, decode_requirements)
+from .completion_prompt import SYSTEM_PROMPT, EXAMPLES
 from .diagnostics import log_event
 from .sessions import Message
 
@@ -52,9 +48,6 @@ def _run_cancellable(factory, cancelled, timeout: float) -> str:
 class SuggestionRequest:
     messages: list[Message]
     draft: str
-    # The app explicitly supplies its persisted style (auto by default).
-    # Low-level callers retain the existing one-request short-completion API.
-    style: str = "short"
 
 
 class SuggestionBackend(Protocol):
@@ -64,8 +57,6 @@ class SuggestionBackend(Protocol):
 MAX_SUGGESTION_CHARS = 360
 COMPLETION_TOKENS = 512
 CONTEXT_TOKENS = 4096
-
-SYSTEM_PROMPT = SHORT_PROMPT
 
 CONTINUATION_SCHEMA = {
     "type": "object",
@@ -78,7 +69,11 @@ CONTINUATION_SCHEMA = {
 def draft_anchor(draft: str) -> str:
     # Keep control characters out of Ollama's regex-constrained JSON string;
     # the full multiline draft remains available in the quoted input.
-    return re.split(r"[\r\n\t]", draft)[-1][-48:]
+    line = re.split(r"[\r\n\t]", draft)[-1]
+    # Keep the unfinished Chinese sentence as the anchor. Copying several
+    # repeated earlier sentences can make a small model stop at the anchor.
+    fragment = re.split(r"[。！？]", line)[-1]
+    return (fragment if fragment.strip() else line)[-48:]
 
 
 def continuation_schema(draft: str) -> dict:
@@ -87,19 +82,6 @@ def continuation_schema(draft: str) -> dict:
     literal = re.escape(draft_anchor(draft))
     return {**CONTINUATION_SCHEMA, "properties": {
         "continuation": {"type": "string", "pattern": "^" + literal + ".*$"}}}
-
-_EXAMPLES = (
-    ([], "Please check the conn", "ection settings"),
-    ([], "这个函数的输出应该", "是什么类型？"),
-    ([], "先不要修改文件，请先", "说明你对需求的理解，并列出需要确认的问题。"),
-    ([], "我觉得", "这里还有一些可以调整的地方。"),
-    ([], "我希望你", "先帮我梳理一下目前的问题。"),
-    ([], "你好", "，我想请你帮我看一个问题。"),
-    ([Message("user", "我正在调整设置页的布局。")], "我想", "把常用设置放得更醒目一些。"),
-    ([Message("assistant", "工具按规则扩写修改意见，并控制字数。")], "现在有个问题", "需要你帮我看一下。"),
-    ([Message("assistant", "生成规则：补充具体检查项、改善点与验收标准，控制总字数。")], "我觉得", "这里还有些地方可以改进。"),
-)
-
 
 def completion_background(messages: list[Message]) -> list[Message]:
     """Exclude quoted generation policies, while retaining adjacent task context.
@@ -133,7 +115,7 @@ def _completion_input(messages: list[Message], draft: str) -> str:
 
 def build_messages(request: SuggestionRequest) -> list[dict[str, str]]:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for background, draft, suffix in _EXAMPLES:
+    for background, draft, suffix in EXAMPLES:
         messages.extend([
             {"role": "user", "content": _completion_input(background, draft)},
             {"role": "assistant", "content": json.dumps({"continuation": draft_anchor(draft) + suffix}, ensure_ascii=False)},
@@ -145,31 +127,6 @@ def build_messages(request: SuggestionRequest) -> list[dict[str, str]]:
 def can_continue(draft: str) -> bool:
     text = draft.strip()
     return bool(text) and not text.endswith(("?", "？"))
-
-
-def build_route_messages(request: SuggestionRequest) -> list[dict[str, str]]:
-    messages = [{"role": "system", "content": ROUTE_PROMPT}]
-    for draft, mode, focus, evidence in ROUTE_EXAMPLES:
-        messages.extend([
-            {"role": "user", "content": _completion_input([], draft)},
-            {"role": "assistant", "content": json.dumps({"mode": mode, "focus": focus, "evidence": evidence}, ensure_ascii=False)},
-        ])
-    messages.append({"role": "user", "content": _completion_input(request.messages, request.draft)})
-    return messages
-
-
-def build_detail_messages(request: SuggestionRequest, route: CompletionRoute) -> list[dict[str, str]]:
-    data = json.loads(_completion_input(request.messages, request.draft))
-    data["focus"] = route.focus
-    readonly = analysis_only(request.draft)
-    example_draft, requirements = (ANALYSIS_EXAMPLES if readonly else DETAIL_EXAMPLES)[route.kind]
-    prompt = DETAIL_COMMON + "\n" + DETAIL_PROMPTS[route.kind]
-    if readonly:
-        prompt += "\n" + ANALYSIS_ONLY_PROMPT
-    return [{"role": "system", "content": prompt},
-            {"role": "user", "content": _completion_input([], example_draft)},
-            {"role": "assistant", "content": json.dumps({"requirements": requirements}, ensure_ascii=False)},
-            {"role": "user", "content": json.dumps(data, ensure_ascii=False).replace("<|", "< |")}]
 
 
 def normalize_suggestion(raw: str, draft: str, limit: int = MAX_SUGGESTION_CHARS) -> str:
@@ -215,8 +172,7 @@ def repeats_input(suffix: str, request: SuggestionRequest) -> bool:
     candidate = compact(suffix)
     if len(candidate) < 10:
         return False
-    for source in (SYSTEM_PROMPT, DETAIL_COMMON, *DETAIL_PROMPTS.values(),
-                   request.draft, *(m.text for m in request.messages)):
+    for source in (SYSTEM_PROMPT, request.draft, *(m.text for m in request.messages)):
         original = compact(source)
         matches = SequenceMatcher(None, candidate, original, autojunk=False).get_matching_blocks()
         longest = max(m.size for m in matches)
@@ -230,50 +186,24 @@ def repeats_input(suffix: str, request: SuggestionRequest) -> bool:
 
 
 async def complete_request(read, request: SuggestionRequest) -> str:
-    """Route, generate and recover within one cancellation/time budget."""
-    route = CompletionRoute()
-    if request.style == "auto":
-        raw = await read(build_route_messages(request), ROUTE_SCHEMA, 160)
-        route = parse_route(raw, request.draft, request.messages)
-    if route.kind != "short":
-        detail_messages = build_detail_messages(request, route)
-        for attempt in range(2):
-            raw = await read(detail_messages, REQUIREMENTS_SCHEMA, COMPLETION_TOKENS)
-            try:
-                result = decode_requirements(raw, request.draft, completion_background(request.messages), route)
-                if repeats_input(result, request):
-                    raise ValueError("copied_input")
-                return result
-            except ValueError:
-                log_event("completion_retry", reason="invalid_requirements")
-                if attempt == 0:
-                    # Correct the violated constraint, without feeding the bad
-                    # output back into context. Still under the same deadline.
-                    detail_messages = build_detail_messages(request, route)
-                    correction = (
-                        "\n上次输出未通过格式检查，请重新生成。确保共 3 项，每项约 35 个中文字符，"
-                        "总长 100–140 字；只补充当前对象的要求，不复述草稿或背景。"
-                        "不要加入任何数字、耗时目标或其他未经提供的定量要求。"
-                    )
-                    if not re.search(r"[\u3400-\u9fff]", request.draft):
-                        correction = ("\nRegenerate in the draft's language: three distinct requirements, "
-                                      "35–55 words total and at most 350 characters. Do not repeat the input "
-                                      "or introduce unsupported numbers, thresholds or implementation choices.")
-                    detail_messages[0]["content"] += correction
-        # A failed expansion still gets a short guess, instead of disappearing.
+    """One adaptive continuation, with at most one repair under the same deadline."""
     schema = continuation_schema(request.draft)
-    raw = await read(build_messages(request), schema, 256)
-    suffix = decode_suggestion(raw, request.draft)
-    if repeats_input(suffix, request) or not normalize_suggestion(suffix, "", limit=60):
-        log_event("completion_retry", reason="invalid_short", suggestion_len=len(suffix))
-        # The draft stays identical. Remove the source of the copied prose from
-        # this repair request; do not feed the bad suggestion back as an example.
-        raw = await read(build_messages(SuggestionRequest([], request.draft)), schema, 256)
-        suffix = decode_suggestion(raw, request.draft)
-        if repeats_input(suffix, request):
-            log_event("completion_output", reason="repeated_after_retry", suggestion_len=0)
-            return ""
-    return SuggestionText(normalize_suggestion(suffix, "", limit=60))
+    messages = build_messages(request)
+    for attempt in range(2):
+        raw = await read(messages, schema, COMPLETION_TOKENS)
+        try:
+            suffix = decode_suggestion(raw, request.draft)
+            if suffix and not repeats_input(suffix, request):
+                return suffix
+        except ValueError:
+            pass
+        if attempt == 0:
+            log_event("completion_retry", reason="invalid_continuation")
+            # Do not feed the bad response back to the model. Remove copied
+            # background while preserving the user's exact current draft.
+            messages = build_messages(SuggestionRequest([], request.draft))
+            messages[0]["content"] += "\n重新续写：保留 anchor，接上新的文字；不要复述背景、草稿或生成规则。"
+    return ""
 
 
 def _local_url(base_url: str) -> str:

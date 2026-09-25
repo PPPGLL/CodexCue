@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="680" viewBox="0 0 1280 680" role="img" aria-labelledby="title desc">
+  <title id="title">CodexCue — 写个开头，接着往下</title>
+  <desc id="desc">合成界面演示：输入表格太挤的修改意见，预览三项检查要求，再按 Tab 接到草稿后。支持减少动态效果。</desc>
+  <defs>
+    <linearGradient id="paper" x2="1" y2="1"><stop stop-color="#f1f4ed"/><stop offset="1" stop-color="#e8eee7"/></linearGradient>
+    <filter id="shadow" x="-10%" y="-15%" width="120%" height="140%"><feDropShadow dy="10" stdDeviation="16" flood-color="#24372b" flood-opacity=".08"/></filter>
+  </defs>
+  <style>
+    text { font-family: 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif; fill: #213027; }
+    .muted { fill: #68766d; } .body { font-size: 23px; }
+    .suggest { animation: suggest 13s infinite; }
+    .accepted { opacity: 0; animation: accepted 13s infinite; }
+    .key { animation: key 13s infinite; }
+    .cursor { animation: blink 1.2s steps(1) infinite; }
+    @keyframes suggest { 0%,10% {opacity:0} 17%,61% {opacity:1} 68%,100% {opacity:0} }
+    @keyframes accepted { 0%,66% {opacity:0} 73%,94% {opacity:1} 100% {opacity:0} }
+    @keyframes key { 0%,54%,69%,100% {fill:#eef3eb} 60%,65% {fill:#d6ff36} }
+    @keyframes blink { 0%,49% {opacity:1} 50%,100% {opacity:0} }
+    @media (prefers-reduced-motion: reduce) {
+      .suggest {animation:none;opacity:1} .accepted {animation:none;opacity:0}
+      .cursor {animation:none;opacity:1} .key {animation:none}
+    }
+  </style>
+  <rect width="1280" height="680" rx="28" fill="url(#paper)"/>
+  <g transform="translate(58 47)">
+    <rect width="45" height="45" rx="8" fill="#111913"/>
+    <path d="m12 13 11 10-11 10m17 0h8" fill="none" stroke="#d6ff36" stroke-width="3"/>
+    <text x="61" y="33" font-size="33" font-weight="650">CodexCue</text>
+  </g>
+  <rect x="1030" y="50" width="192" height="36" rx="18" fill="#e1e8dc"/>
+  <text x="1126" y="74" text-anchor="middle" font-size="16" letter-spacing="1">WINDOWS · BETA</text>
+  <text x="58" y="174" font-size="52" font-weight="650" letter-spacing="2">写个开头，接着往下。</text>
+  <text x="61" y="216" font-size="22" class="muted">短句猜测 · 具体要求 · 按 Tab 接上你的思路</text>
+  <rect x="56" y="256" width="1168" height="338" rx="20" fill="#ffffff" stroke="#dce4d9" filter="url(#shadow)"/>
+  <circle cx="87" cy="286" r="5" fill="#adc797"/>
+  <text x="102" y="292" font-size="15" class="muted">正在写给 Codex 的话</text>
+  <text x="1138" y="292" text-anchor="end" font-size="15" class="muted">你决定发送</text>
+  <line x1="80" y1="312" x2="1200" y2="312" stroke="#edf0eb"/>
+  <text x="86" y="356" class="body">这个表格看起来有点挤，调整一下</text>
+  <rect class="cursor" x="458" y="336" width="2" height="26" fill="#779052"/>
+  <g class="suggest">
+    <rect x="84" y="378" width="1114" height="190" rx="14" fill="#f7faf4" stroke="#c9d7bc"/>
+    <rect class="key" x="1110" y="393" width="65" height="32" rx="7" stroke="#c7d4bd" fill="#eef3eb"/>
+    <text x="1142" y="415" font-size="17" text-anchor="middle">Tab</text>
+    <text x="105" y="456" font-size="20">请检查表头与数据的对齐关系，让同类内容保持一致，便于快速浏览。</text>
+    <text x="105" y="494" font-size="20">梳理单元格之间的留白，避免内容拥挤，同时保留现有数据和操作。</text>
+    <text x="105" y="532" font-size="20">检查长文本与较窄窗口下的显示，确认文字不重叠、不截断。</text>
+  </g>
+  <g class="accepted">
+    <text x="86" y="400" font-size="20">请检查表头与数据的对齐关系，让同类内容保持一致，便于快速浏览。</text>
+    <text x="86" y="440" font-size="20">梳理单元格之间的留白，避免内容拥挤，同时保留现有数据和操作。</text>
+    <text x="86" y="480" font-size="20">检查长文本与较窄窗口下的显示，确认文字不重叠、不截断。</text>
+    <rect x="88" y="526" width="252" height="30" rx="15" fill="#e8f0dd"/>
+    <text x="214" y="547" font-size="15" text-anchor="middle">✓ 已接到草稿后，继续编辑</text>
+  </g>
+  <text x="61" y="637" font-size="16" class="muted">本地模型 · 对话上下文 · 顺着你的思路续写</text>
+  <text x="1217" y="637" text-anchor="end" font-size="14" class="muted">交互示意 / 合成文字</text>
+</svg>
