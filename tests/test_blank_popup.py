@@ -90,9 +90,12 @@ def test_hook_activity_invalidates_tab_before_queued_ui_update():
     assert events[-1] == (10, 20)
 
 
-def test_tray_reports_actual_user_and_assistant_context_counts():
+def test_tray_reports_actual_user_and_assistant_context_counts(monkeypatch):
+    from codex_companion import i18n
     from codex_companion.sessions import Message
 
+    # This test checks the Chinese menu layout, independent of the host locale.
+    monkeypatch.setattr(i18n, "system_ui_languages", lambda: ["zh-CN"])
     companion = controller()
     companion.active_context_label = "当前任务" * 30
     companion.backend_error = ""
