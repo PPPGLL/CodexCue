@@ -9,15 +9,14 @@ import pytest
 from PySide6.QtCore import QRect
 
 from codex_companion.app import InferenceWorker, popup_position
-from codex_companion.model import OllamaBackend, OpenAICompatibleBackend, SuggestionRequest
+from codex_companion.model import OllamaBackend, SuggestionRequest
 from codex_companion.sessions import Message
 from codex_companion.state import RequestToken
 from test_blank_popup import controller
 
 
-@pytest.mark.parametrize("backend_kind", ["ollama", "cloud"])
 @pytest.mark.parametrize("stall", ["headers", "body"])
-def test_cancel_interrupts_network_and_starts_next_request(backend_kind, stall):
+def test_cancel_interrupts_network_and_starts_next_request(stall):
     started, interrupted, finished = (threading.Event() for _ in range(3))
     calls, results = [], []
 
@@ -41,14 +40,11 @@ def test_cancel_interrupts_network_and_starts_next_request(backend_kind, stall):
                     interrupted.set()
             return httpx.Response(200, stream=Paused())
         raw = json.dumps({"continuation": "second suffix"})
-        body = (json.dumps({"message": {"content": raw}, "done": True}) + "\n"
-                if backend_kind == "ollama" else
-                'data: ' + json.dumps({"choices": [{"delta": {"content": raw}}]}) + '\n\ndata: [DONE]\n\n')
+        body = json.dumps({"message": {"content": raw}, "done": True}) + "\n"
         return httpx.Response(200, text=body)
 
     transport = httpx.MockTransport(handler)
-    backend = (OllamaBackend("http://127.0.0.1:11434", "test", transport) if backend_kind == "ollama"
-               else OpenAICompatibleBackend("https://example.test/v1", "test", "test", transport))
+    backend = OllamaBackend("http://127.0.0.1:11434", "test", transport)
     def done(token, text):
         results.append((token.draft, text))
         if token.draft == "second":

@@ -66,7 +66,7 @@ def runtime_distributions():
             if req.marker is None or req.marker.evaluate({"extra": ""}):
                 pending.append(req.name)
     found["pyinstaller"] = metadata.distribution("pyinstaller")
-    # PyInstaller's keyring hooks can include setuptools vendored modules.
+    # Include notices for the packaging toolchain as well as runtime packages.
     found["setuptools"] = metadata.distribution("setuptools")
     return found
 

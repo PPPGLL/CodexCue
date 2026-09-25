@@ -1,6 +1,6 @@
 # Windows 使用指南
 
-支持 Windows 10/11 x64。Codex Desktop 为主要宿主，VS Code 面板为实验支持。发布包包含应用；本地推理需要已安装的 Ollama 模型，也可选择 OpenAI-compatible 服务。
+支持 Windows 10/11 x64。Codex Desktop 为主要宿主，VS Code 面板为实验支持。发布包包含应用；补全需要本机已安装的 Ollama 和模型。
 
 ## 安装并启动
 
@@ -18,7 +18,7 @@
    ```
 
    默认安装到 `%LOCALAPPDATA%\Programs\CodexCue`，无需管理员权限。指定位置可添加 `-InstallRoot 'D:\Apps\CodexCue'`。
-4. 在设置中选择本地 Ollama 或云端服务，保存后打开 Codex 输入框开始使用。单击托盘图标可重新打开设置。
+4. 在设置中选择本地 Ollama 模型，保存后打开 Codex 输入框开始使用。单击托盘图标可重新打开设置。
 
 需要自动安装本地模型时，在源码仓库运行 `scripts/setup.ps1 -Start`。首次下载约 1.5 GB Ollama 和 2.5 GB 默认模型；代理与其他模型选项见仓库 README。
 
@@ -28,12 +28,12 @@
 
 | 设置 | 用途 |
 | --- | --- |
-| 服务与模型 | 选择本地 Ollama，或配置云端地址、模型和密钥 |
+| Ollama 地址与模型 | 连接本机 Ollama，选择已安装的模型或下载模型 |
 | 模型空闲释放时间 | 默认 60 秒；0 表示每次请求后释放 |
 
 续写长短由模型根据当前输入决定。识别到任务时自动参考近期对话，否则根据草稿生成。按 Tab 采用建议，继续输入会更新建议。空输入框保持安静，完整问句不会被续成答案。中文组词时 Tab 保留给输入法。暂停和退出也会请求释放本地模型。
 
-云端配置填写 HTTPS 服务地址、模型名称与 API Key。草稿和相关对话片段会发送给该服务；密钥存储在 Windows 凭据管理器。本地 Ollama 请求仅连接本机回环地址。
+Ollama 请求仅连接本机回环地址，草稿和相关对话片段留在本机。
 
 ## 更新与回退
 
@@ -56,7 +56,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\
 
 - 设置与诊断日志：`%LOCALAPPDATA%\CodexCue`。
 - 源码安装的后备配置、工具和模型：仓库的 `.local` 目录。
-- API Key：Windows 凭据管理器中对应服务地址的 `codexcue` 条目；旧版可能使用 `codex-composer-companion`。
 - Ollama 及模型库。
 
 如需清除这些数据，先退出应用，再删除明确属于 CodexCue 的设置和日志目录、相应凭据。模型使用 `ollama rm MODEL:TAG` 按需移除。`CODEXCUE_DATA_DIR` 可为隔离部署指定独立配置与日志目录。

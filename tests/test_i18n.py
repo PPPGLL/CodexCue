@@ -23,8 +23,8 @@ def test_english_settings_and_tray_menu_follow_display_language(monkeypatch):
     dialog = SettingsDialog(AppConfig())
     try:
         assert dialog.windowTitle() == "CodexCue · Settings"
-        assert dialog.backend.itemText(0) == "Local Ollama"
-        assert dialog.cloud_key.placeholderText() == "Leave blank to keep the saved key"
+        assert dialog.ollama_url.text() == "http://127.0.0.1:11434"
+        assert not hasattr(dialog, "cloud_key")
         assert dialog.model_note.text() == "Default: balances speed and quality."
         buttons = {button.text() for button in dialog.findChildren(QPushButton)}
         assert {"Save", "Cancel", "Download model"} <= buttons

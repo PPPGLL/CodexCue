@@ -1,5 +1,4 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
 from pathlib import Path
 import json
 import subprocess
@@ -25,7 +24,7 @@ a = Analysis(
     pathex=['src'],
     binaries=uiautomation_dlls,
     datas=[(str(build_info), '.')],
-    hiddenimports=collect_submodules('keyring.backends') + ['uiautomation'],
+    hiddenimports=['uiautomation'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

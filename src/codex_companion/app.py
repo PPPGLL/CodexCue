@@ -20,9 +20,9 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from .branding import app_icon, render_mark, tray_icon
-from .config import (AppConfig, KEYRING_SERVICE, OLLAMA_MODEL_CHOICES,
+from .config import (AppConfig, OLLAMA_MODEL_CHOICES,
                      default_sessions_root,
-                     existing_config_path, get_cloud_key)
+                     existing_config_path)
 from .diagnostics import log_event, log_path, setup_logging
 from .i18n import tr
 from .model import OllamaBackend, SuggestionRequest, make_backend
@@ -612,31 +612,19 @@ class SettingsDialog(QDialog):
         layout.addLayout(header)
         form = QFormLayout()
         form.setSpacing(10)
-        self.backend = InkComboBox()
-        self.backend.addItems([tr("backend_local"), tr("backend_cloud")])
-        self.backend.setCurrentIndex(0 if config.backend == "ollama" else 1)
         self.ollama_url = QLineEdit(config.ollama_url)
         self.ollama_model = InkComboBox()
         self.ollama_model.setEditable(True)
         self.ollama_model.addItems([name for name, _ in OLLAMA_MODEL_CHOICES])
         self.ollama_model.setCurrentText(config.ollama_model)
         self.ollama_model.currentTextChanged.connect(self.update_model_note)
-        self.cloud_url = QLineEdit(config.cloud_base_url)
-        self.cloud_model = QLineEdit(config.cloud_model)
-        self.cloud_key = QLineEdit()
-        self.cloud_key.setEchoMode(QLineEdit.Password)
-        self.cloud_key.setPlaceholderText(tr("keep_key"))
         self.model_idle = QSpinBox()
         self.model_idle.setRange(0, 3600)
         self.model_idle.setValue(config.model_idle_seconds)
         self.model_idle.setSuffix(tr("seconds"))
         self.model_idle.setToolTip(tr("idle_help"))
-        for label, widget in [(tr("field_backend"), self.backend),
-                              (tr("field_ollama_url"), self.ollama_url),
+        for label, widget in [(tr("field_ollama_url"), self.ollama_url),
                               (tr("field_local_model"), self.ollama_model),
-                              ("API Base URL", self.cloud_url),
-                              (tr("field_cloud_model"), self.cloud_model),
-                              ("API Key", self.cloud_key),
                               (tr("field_model_idle"), self.model_idle)]:
             form.addRow(label, widget)
         layout.addLayout(form)
@@ -802,50 +790,33 @@ class SettingsDialog(QDialog):
             self.status.setText(tr("model_download_failed", code=code))
 
     def save(self) -> None:
-        backend = "ollama" if self.backend.currentIndex() == 0 else "cloud"
         try:
-            if backend == "ollama":
-                url = self.ollama_url.text().strip()
-                model = self.ollama_model.currentText().strip()
-                if not model:
-                    raise ValueError(tr("enter_model"))
-                self._save_check_id += 1
-                check_id = self._save_check_id
-                self._pending_save = (url, model)
-                self.save_button.setEnabled(False)
-                self.status.setText(tr("checking_models"))
+            url = self.ollama_url.text().strip()
+            model = self.ollama_model.currentText().strip()
+            if not model:
+                raise ValueError(tr("enter_model"))
+            self._save_check_id += 1
+            check_id = self._save_check_id
+            self._pending_save = (url, model)
+            self.save_button.setEnabled(False)
+            self.status.setText(tr("checking_models"))
 
-                def check() -> None:
+            def check() -> None:
+                try:
+                    probe = OllamaBackend(url, model)
                     try:
-                        probe = OllamaBackend(url, model)
-                        try:
-                            _, installed = probe.available()
-                        finally:
-                            probe.close()
-                        result = "" if installed else "model_missing"
-                    except Exception as exc:
-                        result = str(exc)
-                    self.save_checked.emit(check_id, result)
+                        _, installed = probe.available()
+                    finally:
+                        probe.close()
+                    result = "" if installed else "model_missing"
+                except Exception as exc:
+                    result = str(exc)
+                self.save_checked.emit(check_id, result)
 
-                threading.Thread(target=check, daemon=True).start()
-                return
-            else:
-                from urllib.parse import urlparse
-                url = self.cloud_url.text().strip()
-                parsed = urlparse(url)
-                if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-                    raise ValueError(tr("https_required"))
-                if not parsed.netloc or not self.cloud_model.text().strip():
-                    raise ValueError(tr("api_address_model_required"))
-                import keyring
-                if not self.cloud_key.text() and not get_cloud_key(url):
-                    raise ValueError(tr("api_key_required"))
-                if self.cloud_key.text():
-                    keyring.set_password(KEYRING_SERVICE, url, self.cloud_key.text())
+            threading.Thread(target=check, daemon=True).start()
         except Exception as exc:
             self.status.setText(str(exc))
             return
-        self._commit_config(backend)
 
     def _on_save_checked(self, check_id: int, error: str) -> None:
         if check_id != self._save_check_id:
@@ -856,18 +827,15 @@ class SettingsDialog(QDialog):
         if error:
             self.status.setText(tr("selected_model_missing") if error == "model_missing" else error)
             return
-        if (pending != (self.ollama_url.text().strip(), self.ollama_model.currentText().strip())
-                or self.backend.currentIndex() != 0):
+        if pending != (self.ollama_url.text().strip(), self.ollama_model.currentText().strip()):
             return
-        self._commit_config("ollama")
+        self._commit_config()
 
-    def _commit_config(self, backend: str) -> None:
+    def _commit_config(self) -> None:
         from dataclasses import replace
 
-        updates = dict(backend=backend, ollama_url=self.ollama_url.text().strip(),
+        updates = dict(ollama_url=self.ollama_url.text().strip(),
                        ollama_model=self.ollama_model.currentText().strip(),
-                       cloud_base_url=self.cloud_url.text().strip(),
-                       cloud_model=self.cloud_model.text().strip(),
                        model_idle_seconds=self.model_idle.value())
         try:
             replace(self.config, **updates).save()
@@ -1213,7 +1181,7 @@ class Companion(QObject):
             return
         old = self.backend
         self.backend = new_backend
-        log_event("backend_configured", backend=self.config.backend)
+        log_event("backend_configured", backend="ollama")
         if old:
             # A previous streaming request can still be unwinding here. Closing
             # its HTTP client must not hold up the settings window or input hook.
@@ -1256,9 +1224,7 @@ class Companion(QObject):
                 except Exception as exc:
                     self.bridge.warmed.emit(new_backend, False, str(exc))
             threading.Thread(target=warm, daemon=True).start()
-        elif not isinstance(new_backend, OllamaBackend):
-            self.ready = True
-            self.refresh_menu()
+        self.refresh_menu()
 
     def shutdown_backend(self) -> None:
         self.invalidate()

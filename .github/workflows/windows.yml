@@ -24,7 +24,7 @@ jobs:
         shell: pwsh
         run: |
           $env:UV_PYTHON_PREFERENCE = 'only-managed'
-          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly -ForceUvInstall
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -EnvironmentOnly -ForceUvInstall
       - name: Test missing-uv branch with a mock installer
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_setup_bootstrap.ps1
       - run: .\.venv\Scripts\python.exe -m pytest
@@ -38,7 +38,7 @@ jobs:
       - name: Build and package versioned release candidate
         shell: pwsh
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly -Build
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -EnvironmentOnly -Build
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           .\.venv\Scripts\python.exe scripts\package_release.py --output release-artifacts
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

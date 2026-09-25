@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from codex_companion.config import AppConfig
-from codex_companion.model import (OllamaBackend, OpenAICompatibleBackend, SuggestionRequest,
+from codex_companion.model import (OllamaBackend, SuggestionRequest,
                                    complete_request, completion_background, draft_anchor, decode_suggestion)
 from codex_companion.sessions import Message
 
@@ -51,19 +51,16 @@ def test_invalid_or_copied_output_gets_only_one_repair(bad, repair_ok):
     assert len(calls) == 2 and calls[1]["background"] == []
 
 
-@pytest.mark.parametrize("cloud", [False, True])
-def test_generation_and_repair_share_one_total_deadline(cloud):
+def test_generation_and_repair_share_one_total_deadline():
     calls = []
     async def handler(request):
         calls.append(True)
         await asyncio.sleep(.08)
         raw = json.dumps({"continuation": "调整列表"})
-        body = ("data: " + json.dumps({"choices": [{"delta": {"content": raw}}]}) + "\n\ndata: [DONE]\n\n"
-                if cloud else json.dumps({"message": {"content": raw}, "done": True}))
+        body = json.dumps({"message": {"content": raw}, "done": True})
         return httpx.Response(200, text=body)
     transport = httpx.MockTransport(handler)
-    backend = (OpenAICompatibleBackend("https://example.com/v1", "fixture", "key", transport, request_timeout=.13)
-               if cloud else OllamaBackend("http://127.0.0.1:11434", "fixture", transport, request_timeout=.13))
+    backend = OllamaBackend("http://127.0.0.1:11434", "fixture", transport, request_timeout=.13)
     try:
         with pytest.raises(TimeoutError):
             backend.suggest(SuggestionRequest([], "调整列表"), lambda _: pytest.fail("late result"), threading.Event())
@@ -102,7 +99,7 @@ def test_settings_and_popup_show_no_mode_controls(qapp, monkeypatch):
     popup = SuggestionPopup()
     try:
         assert not hasattr(dialog, "completion_style") and not hasattr(dialog, "completion_mode")
-        dialog._commit_config("ollama")
+        dialog._commit_config()
         assert saved[0].ollama_model == config.ollama_model
         popup.show_text("。请检查内容是否完整。", (10, 10, 500, 100), suggest=True)
         texts = [label.text() for label in popup.findChildren(QLabel)]

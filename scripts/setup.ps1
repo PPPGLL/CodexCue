@@ -9,7 +9,7 @@
 param(
     [switch]$SkipModel,
     [switch]$SkipOllama,
-    [switch]$AppOnly,
+    [switch]$EnvironmentOnly,
     [switch]$ForceUvInstall,
     [switch]$Build,
     [switch]$Start,
@@ -75,7 +75,7 @@ function Wait-Ollama {
 
 if ($env:OS -ne 'Windows_NT') { Fail 'Windows is required.' }
 if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { Fail 'Windows x64 is required.' }
-if (-not $AppOnly -and -not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { Fail 'curl.exe is required.' }
+if (-not $EnvironmentOnly -and -not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { Fail 'curl.exe is required.' }
 if ($Build) {
     $packageExe = Join-Path $repo 'dist\CodexCue\CodexCue.exe'
     $inUse = @(Get-Process CodexCue -ErrorAction SilentlyContinue |
@@ -100,11 +100,11 @@ try {
 
 $python = Join-Path $repo '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) { Fail 'Python virtual environment was not created.' }
-& $python -c 'import PySide6, httpx, uiautomation, psutil, keyring, codex_companion'
+& $python -c 'import PySide6, httpx, uiautomation, psutil, codex_companion'
 if ($LASTEXITCODE -ne 0) { Fail 'Installed application failed its import check.' }
 
-if ($AppOnly) {
-    Say 'Application installed. Configure an OpenAI-compatible backend in the Settings menu.'
+if ($EnvironmentOnly) {
+    Say 'Development environment ready. Completion requires local Ollama and an installed model.'
 } else {
 $ollamaExe = $null
 $installed = Get-Command ollama -ErrorAction SilentlyContinue

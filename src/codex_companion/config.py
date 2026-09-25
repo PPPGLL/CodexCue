@@ -16,8 +16,6 @@ OLLAMA_MODEL_CHOICES = (
     (DEFAULT_OLLAMA_MODEL, "model_default"),
     ("qwen3:8b", "model_large"),
 )
-KEYRING_SERVICE = "codexcue"
-LEGACY_KEYRING_SERVICE = "codex-composer-companion"
 
 
 def default_config_path() -> Path:
@@ -48,13 +46,6 @@ def existing_config_path() -> Path:
         legacy_config_path() if legacy_config_path().is_file() else current)
 
 
-def get_cloud_key(url: str) -> str:
-    import keyring
-
-    return (keyring.get_password(KEYRING_SERVICE, url)
-            or keyring.get_password(LEGACY_KEYRING_SERVICE, url) or "")
-
-
 def portable_config_path() -> Path:
     return Path(sys.executable).resolve().parents[2] / ".local" / "companion-config.json"
 
@@ -65,13 +56,10 @@ def default_sessions_root() -> Path:
 
 @dataclass
 class AppConfig:
-    backend: str = "ollama"
     ollama_url: str = DEFAULT_OLLAMA_URL
     ollama_model: str = DEFAULT_OLLAMA_MODEL
     ollama_executable: str = ""
     ollama_models_dir: str = ""
-    cloud_base_url: str = ""
-    cloud_model: str = ""
     enabled: bool = True
     model_idle_seconds: int = 60
     request_timeout_seconds: float = 8.0
@@ -96,8 +84,7 @@ class AppConfig:
                 if not valid:
                     raise ValueError("Invalid configuration field type")
             result = cls(**values)
-            if (result.backend not in {"ollama", "cloud"}
-                    or not 0 <= result.model_idle_seconds <= 3600
+            if (not 0 <= result.model_idle_seconds <= 3600
                     or not 0 < result.request_timeout_seconds <= 120):
                 raise ValueError("Invalid configuration value")
             return result

@@ -8,7 +8,6 @@ import pytest
 from codex_companion.model import (
     MAX_SUGGESTION_CHARS,
     OllamaBackend,
-    OpenAICompatibleBackend,
     SuggestionRequest,
     decode_suggestion,
     draft_anchor,
@@ -18,8 +17,7 @@ from codex_companion.model import (
 from codex_companion.sessions import Message
 
 
-@pytest.mark.parametrize("cloud", [False, True])
-def test_both_backends_preserve_a_complete_detailed_request(cloud):
+def test_local_backend_preserves_a_complete_detailed_request():
     draft = "Please improve this form"
     suffix = (". Clarify the labels and group related fields together. "
               "Show which values need attention and keep the entered values when validation fails. "
@@ -30,21 +28,16 @@ def test_both_backends_preserve_a_complete_detailed_request(cloud):
     def handler(request):
         body = json.loads(request.content)
         calls.append(body)
-        budget = body["max_tokens"] if cloud else body["options"]["num_predict"]
+        budget = body["options"]["num_predict"]
         assert budget >= 384
         raw = json.dumps({"continuation": draft_anchor(draft) + suffix})
         pieces = [raw[:55], raw[55:130], raw[130:]]
-        if cloud:
-            text = "".join("data: " + json.dumps({"choices": [{"delta": {"content": part}}]})
-                           + "\n\n" for part in pieces) + "data: [DONE]\n\n"
-        else:
-            text = "\n".join(json.dumps({"message": {"content": part}, "done": i == 2})
-                             for i, part in enumerate(pieces))
+        text = "\n".join(json.dumps({"message": {"content": part}, "done": i == 2})
+                         for i, part in enumerate(pieces))
         return httpx.Response(200, text=text)
 
     transport = httpx.MockTransport(handler)
-    backend = (OpenAICompatibleBackend("https://example.com/v1", "fixture", "test-key", transport)
-               if cloud else OllamaBackend("http://127.0.0.1:11434", "fixture", transport))
+    backend = OllamaBackend("http://127.0.0.1:11434", "fixture", transport)
     emitted = []
     try:
         result = backend.suggest(SuggestionRequest([], draft), emitted.append, threading.Event())
@@ -69,9 +62,8 @@ def test_overlong_suggestion_ends_at_a_complete_requirement():
     assert normalize_suggestion("value 3.14 " * 100, "", limit=8) == ""
 
 
-@pytest.mark.parametrize("cloud", [False, True])
 @pytest.mark.parametrize("repeat_again", [False, True])
-def test_copied_background_is_repaired_once_before_any_emission(cloud, repeat_again):
+def test_copied_background_is_repaired_once_before_any_emission(repeat_again):
     draft = "这个图表不易读，改一下"
     copied = ("请在收到粗略修改意见后自动补充几个具体要求，描述检查方式和验收标准，"
               "避免重复已有内容，确保新增文字自然衔接原句。")
@@ -85,14 +77,10 @@ def test_copied_background_is_repaired_once_before_any_emission(cloud, repeat_ag
         assert bool(data["background"]) == (len(calls) == 1)
         suffix = copied if len(calls) == 1 or repeat_again else corrected
         raw = json.dumps({"continuation": draft_anchor(draft) + suffix})
-        if cloud:
-            return httpx.Response(200, text="data: " + json.dumps({"choices": [{"delta": {"content": raw}}]})
-                                  + "\n\ndata: [DONE]\n\n")
         return httpx.Response(200, text=json.dumps({"message": {"content": raw}, "done": True}))
 
     transport = httpx.MockTransport(handler)
-    backend = (OpenAICompatibleBackend("https://example.com/v1", "fixture", "test-key", transport)
-               if cloud else OllamaBackend("http://127.0.0.1:11434", "fixture", transport))
+    backend = OllamaBackend("http://127.0.0.1:11434", "fixture", transport)
     emitted = []
     try:
         result = backend.suggest(SuggestionRequest([Message("assistant", copied)], draft),
@@ -109,17 +97,14 @@ def test_shared_domain_terms_are_not_mistaken_for_copied_prose():
     assert not repeats_input("。请提高颜色之间的对比度，让标注与对应数据保持清晰关联，再检查缩小窗口时是否仍可读。", request)
 
 
-@pytest.mark.parametrize("cloud", [False, True])
-def test_openers_do_not_turn_background_into_a_task(cloud):
+def test_openers_do_not_turn_background_into_a_task():
     def handler(request):
         data = json.loads(json.loads(request.content)["messages"][-1]["content"])
         raw = json.dumps({"continuation": data["anchor"] + "，请帮我看看。"})
-        body = ("data: " + json.dumps({"choices": [{"delta": {"content": raw}}]}) + "\n\ndata: [DONE]\n\n"
-                if cloud else json.dumps({"message": {"content": raw}, "done": True}))
+        body = json.dumps({"message": {"content": raw}, "done": True})
         return httpx.Response(200, text=body)
     transport = httpx.MockTransport(handler)
-    backend = (OpenAICompatibleBackend("https://example.com/v1", "fixture", "test-key", transport)
-               if cloud else OllamaBackend("http://127.0.0.1:11434", "fixture", transport))
+    backend = OllamaBackend("http://127.0.0.1:11434", "fixture", transport)
     try:
         for draft in ("你好", "你好世界", "Hello", "测试", "我想", "我希望你", "我觉得", "现在有个问题"):
             emitted = []
@@ -130,8 +115,7 @@ def test_openers_do_not_turn_background_into_a_task(cloud):
         backend.close()
 
 
-@pytest.mark.parametrize("cloud", [False, True])
-def test_editing_the_draft_cancels_a_stalled_repair(cloud):
+def test_editing_the_draft_cancels_a_stalled_repair():
     copied = "Earlier writing instructions must not be copied into the user's message. Return useful details instead."
     repair_started, interrupted, cancel = (threading.Event() for _ in range(3))
     calls = []
@@ -145,13 +129,11 @@ def test_editing_the_draft_cancels_a_stalled_repair(cloud):
             finally:
                 interrupted.set()
         raw = json.dumps({"continuation": "draft" + copied})
-        body = ("data: " + json.dumps({"choices": [{"delta": {"content": raw}}]}) + "\n\ndata: [DONE]\n\n"
-                if cloud else json.dumps({"message": {"content": raw}, "done": True}))
+        body = json.dumps({"message": {"content": raw}, "done": True})
         return httpx.Response(200, text=body)
 
     transport = httpx.MockTransport(handler)
-    backend = (OpenAICompatibleBackend("https://example.com/v1", "fixture", "test-key", transport)
-               if cloud else OllamaBackend("http://127.0.0.1:11434", "fixture", transport))
+    backend = OllamaBackend("http://127.0.0.1:11434", "fixture", transport)
     results, emitted = [], []
     worker = threading.Thread(target=lambda: results.append(backend.suggest(
         SuggestionRequest([Message("assistant", copied)], "draft"), emitted.append, cancel)))

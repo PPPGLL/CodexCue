@@ -8,14 +8,14 @@
 
 ```powershell
 # 只准备应用和开发环境；已有 Ollama 时无需重复下载
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -EnvironmentOnly
 
 # 启动开发实例，设置和日志写入独立目录
 $env:CODEXCUE_DATA_DIR = "$PWD\.local\dev-data"
 .\.venv\Scripts\python.exe -m codex_companion
 ```
 
-首次运行时选择本机已有模型或云端服务。测试已有安装包时先退出开发实例，避免两个进程争用同一输入框。终端结束后环境变量自然失效；同一终端可用 `Remove-Item Env:CODEXCUE_DATA_DIR` 清除。
+首次运行时选择本机已安装的 Ollama 模型。测试已有安装包时先退出开发实例，避免两个进程争用同一输入框。终端结束后环境变量自然失效；同一终端可用 `Remove-Item Env:CODEXCUE_DATA_DIR` 清除。
 
 ## 一次改动的流程
 

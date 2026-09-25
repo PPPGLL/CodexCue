@@ -46,7 +46,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -Start
 单击系统托盘图标打开设置，右键可暂停补全、查看状态和日志位置。已有 Windows 发布包时，按[安装指南](docs/WINDOWS.md)安装或更新；草稿发布包仅对有仓库权限的用户可见。
 
 <details>
-<summary>使用代理、其他模型或云端服务</summary>
+<summary>使用代理或其他模型</summary>
 
 ```powershell
 # 为首次下载设置 HTTP 代理
@@ -55,11 +55,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -ProxyUr
 # 选择其他 Ollama 模型
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -OllamaModel qwen3:1.7b -Start
 
-# 使用 OpenAI-compatible 服务：先安装应用，再在设置中填入服务地址、模型和密钥
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly -Start
 ```
 
-设置支持选择已安装模型，也支持按名称下载。较小模型占用更少；补全质量和等待时间取决于模型与硬件。云端地址使用 HTTPS，API Key 存储在 Windows 凭据管理器。
+设置支持选择已安装模型，也支持按名称下载。较小模型占用更少；补全质量和等待时间取决于模型与硬件。
 
 </details>
 
@@ -67,7 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly
 
 - **上下文自动切换**：识别当前 Codex 任务，使用近期对话辅助续写；新任务可直接根据草稿补全。
 - **输入优先**：继续打字、切换任务或发送消息后，旧建议立即失效；中文输入法组词时保留 Tab 给候选词。
-- **本地优先**：默认通过本机 Ollama 推理，模型空闲后自动释放。选择云端服务时，草稿与相关对话片段会发送给该服务。
+- **本地推理**：通过本机 Ollama 生成建议，草稿与对话片段留在本机，模型空闲后自动释放。
 - **设置随系统语言**：中文 Windows 显示中文，其余显示英文。
 
 诊断日志记录状态、耗时和数量，不记录草稿正文、对话正文或密钥。遇到识别问题，可在 Codex 输入框使用 **Ctrl+Alt+D**，通过剪贴板读取草稿并请求补全。
@@ -88,4 +86,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly
 
 [MIT](LICENSE) · [第三方组件说明](docs/THIRD_PARTY_NOTICES.md)
 
-CodexCue 是独立项目，与 OpenAI 无隶属关系。补全使用你配置的 Ollama 或云端服务。
+CodexCue 是独立项目，与 OpenAI 无隶属关系。补全使用你配置的本地 Ollama 模型。

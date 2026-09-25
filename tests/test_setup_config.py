@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 
-from codex_companion.config import AppConfig, get_cloud_key
+from codex_companion.config import AppConfig
 from codex_companion.setup_config import main
 
 
@@ -18,7 +18,7 @@ def test_setup_saves_runtime_paths_without_model_files(tmp_path, monkeypatch):
     monkeypatch.setenv("COMPANION_OLLAMA_MODEL", "qwen3:1.7b")
     main()
     config = AppConfig.load()
-    assert config.backend == "ollama"
+    assert config.ollama_url == "http://127.0.0.1:11434"
     assert config.ollama_executable == str(executable)
     assert config.ollama_models_dir == str(tmp_path / "models")
     assert config.ollama_model == "qwen3:1.7b"
@@ -74,17 +74,3 @@ def test_codexcue_reads_legacy_config_then_saves_under_new_name(tmp_path, monkey
     new = tmp_path / "CodexCue" / "config.json"
     assert new.is_file()
     assert AppConfig.load().ollama_model == "legacy-model"
-
-
-def test_codexcue_can_read_existing_cloud_key(monkeypatch):
-    import keyring
-
-    found = []
-
-    def password(service, url):
-        found.append((service, url))
-        return "old-key" if service == "codex-composer-companion" else None
-
-    monkeypatch.setattr(keyring, "get_password", password)
-    assert get_cloud_key("https://example.test/v1") == "old-key"
-    assert [service for service, _ in found] == ["codexcue", "codex-composer-companion"]

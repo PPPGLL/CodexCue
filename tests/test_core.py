@@ -7,8 +7,7 @@ import threading
 import httpx
 import pytest
 
-from codex_companion.model import (OllamaBackend, OpenAICompatibleBackend,
-                                   SuggestionRequest, build_messages,
+from codex_companion.model import (OllamaBackend, SuggestionRequest, build_messages,
                                    decode_suggestion, normalize_suggestion)
 from codex_companion.sessions import (Message, SessionIndex, SessionInfo, SessionTailer,
                                       match_visible_session)
@@ -308,18 +307,7 @@ def test_ollama_lists_installed_models_by_size():
     backend.close()
 
 
-def test_cloud_sse_mock_and_https_gate():
-    def handler(request):
-        assert request.headers["authorization"] == "Bearer test-key"
-        assert json.loads(request.content)["max_tokens"] >= 256
-        chunks = ['{"continuation":"再', '试一次"}']
-        return httpx.Response(200, text=''.join(
-            'data: ' + json.dumps({"choices": [{"delta": {"content": chunk}}]}) + '\n\n'
-            for chunk in chunks) + 'data: [DONE]\n\n')
-    backend = OpenAICompatibleBackend("https://example.com/v1", "mock", "test-key", httpx.MockTransport(handler))
-    chunks = []
-    assert backend.suggest(SuggestionRequest([], "再"), chunks.append, threading.Event()) == "试一次"
-    assert chunks[-1] == "试一次"
-    backend.close()
-    with pytest.raises(ValueError):
-        OpenAICompatibleBackend("http://example.com/v1", "mock", "key")
+@pytest.mark.parametrize("url", ["https://example.com/v1", "http://example.com:11434"])
+def test_completion_endpoint_must_be_local(url):
+    with pytest.raises(ValueError, match="local HTTP"):
+        OllamaBackend(url, "fixture")

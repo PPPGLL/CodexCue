@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .config import AppConfig, get_cloud_key
+from .config import AppConfig
 from .completion_prompt import SYSTEM_PROMPT, EXAMPLES
 from .diagnostics import log_event
 from .sessions import Message
@@ -339,72 +339,7 @@ class OllamaBackend:
         self.client.close()
 
 
-class OpenAICompatibleBackend:
-    def __init__(
-        self,
-        base_url: str,
-        model: str,
-        api_key: str,
-        transport: httpx.BaseTransport | None = None,
-        *, request_timeout: float = 8.0,
-    ) -> None:
-        parsed = urlparse(base_url)
-        if parsed.scheme != "https" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-            raise ValueError("Cloud endpoints must use HTTPS")
-        if not parsed.netloc or not model or not api_key:
-            raise ValueError("Cloud endpoint, model, and API key are required")
-        self.url = f"{base_url.rstrip('/')}/chat/completions"
-        self.model = model
-        self.api_key = api_key
-        self.transport = transport
-        self.request_timeout = request_timeout
-        self.client = httpx.Client(transport=transport, timeout=httpx.Timeout(35.0, connect=5.0))
-
-    def suggest(self, request: SuggestionRequest, emit: Emit, cancel: threading.Event) -> str:
-        if not can_continue(request.draft):
-            return ""
-        payload = {
-            "model": self.model,
-            "messages": build_messages(request),
-            "stream": True,
-            "temperature": 0,
-            "max_tokens": COMPLETION_TOKENS,
-        }
-        async def stream(messages, schema, budget):
-            raw = ""
-            payload["messages"] = messages
-            payload["max_tokens"] = budget
-            async with httpx.AsyncClient(transport=self.transport, timeout=self.request_timeout) as client:
-                async with client.stream("POST", self.url, json=payload,
-                                         headers={"Authorization": f"Bearer {self.api_key}"}) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data = line[6:]
-                        if data == "[DONE]":
-                            break
-                        delta = json.loads(data).get("choices", [{}])[0].get("delta", {})
-                        raw += delta.get("content") or ""
-            return raw
-        final = _run_cancellable(lambda: complete_request(stream, request), cancel.is_set, self.request_timeout)
-        if cancel.is_set() or not final:
-            return ""
-        if final:
-            emit(final)
-        return final
-
-    def close(self) -> None:
-        self.client.close()
-
-
-def make_backend(config: AppConfig) -> SuggestionBackend:
-    if config.backend == "ollama":
-        return OllamaBackend(config.ollama_url, config.ollama_model,
-                             keep_alive_seconds=config.model_idle_seconds,
-                             request_timeout=config.request_timeout_seconds)
-    if config.backend == "cloud":
-        api_key = get_cloud_key(config.cloud_base_url)
-        return OpenAICompatibleBackend(config.cloud_base_url, config.cloud_model, api_key,
-                                       request_timeout=config.request_timeout_seconds)
-    raise ValueError(f"Unknown backend: {config.backend}")
+def make_backend(config: AppConfig) -> OllamaBackend:
+    return OllamaBackend(config.ollama_url, config.ollama_model,
+                         keep_alive_seconds=config.model_idle_seconds,
+                         request_timeout=config.request_timeout_seconds)
