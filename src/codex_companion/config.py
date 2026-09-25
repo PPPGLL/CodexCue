@@ -61,7 +61,6 @@ class AppConfig:
     ollama_executable: str = ""
     ollama_models_dir: str = ""
     enabled: bool = True
-    model_idle_seconds: int = 60
     request_timeout_seconds: float = 8.0
 
     @classmethod
@@ -84,8 +83,7 @@ class AppConfig:
                 if not valid:
                     raise ValueError("Invalid configuration field type")
             result = cls(**values)
-            if (not 0 <= result.model_idle_seconds <= 3600
-                    or not 0 < result.request_timeout_seconds <= 120):
+            if not 0 < result.request_timeout_seconds <= 120:
                 raise ValueError("Invalid configuration value")
             return result
         except (OSError, UnicodeError, ValueError, TypeError, OverflowError):

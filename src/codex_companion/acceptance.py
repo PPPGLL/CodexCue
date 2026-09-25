@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QVBoxLayout, QWid
 from .app import Companion
 from .config import AppConfig, DEFAULT_OLLAMA_URL
 from .diagnostics import setup_logging, shutdown_logging
+from .i18n import tr
 from . import windows_input as wi
 
 TITLE_A = "补全功能的识别验证"  # Nine-character title, no visible message body.
@@ -60,6 +61,7 @@ class ModelServer(ThreadingHTTPServer):
     def __init__(self):
         super().__init__(("127.0.0.1", 0), ModelHandler)
         self.requests = []
+        self.payloads = []
         self.release = threading.Event()
         self.release.set()
 
@@ -77,6 +79,7 @@ class ModelHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.server.payloads.append(payload)
         if payload.get("stream"):
             self.server.requests.append(json.loads(payload["messages"][-1]["content"]))
             self.server.release.wait(5)
@@ -261,31 +264,28 @@ def main(argv=None) -> int:
                 check("quoted_rules_do_not_become_suggestions", not quality_errors and len(quality_results) == 13
                       and all(row["status"] == "PASS" for row in quality_results))
 
-                # Verify the actual server unloads this model after idle and on
-                # explicit release; no model is installed or downloaded here.
-                companion.backend.keep_alive_seconds = 1
-                warmed = threading.Event()
-                def warm_short():
-                    companion.backend.warm()
-                    warmed.set()
-                threading.Thread(target=warm_short, daemon=True).start()
-                wait_for(app, warmed.is_set, "short model residency warm", timeout=30)
+                # Test residency beyond the former 60-second timeout, including
+                # pause, the actual tray action, and reloading on the next edit.
+                import httpx
                 def resident():
-                    response = companion.backend.client.get(companion.backend.base_url + "/api/ps", timeout=2)
+                    response = httpx.get(args.ollama_url + "/api/ps", timeout=2, trust_env=False)
                     response.raise_for_status()
                     return any(m.get("name") == args.live_model for m in response.json().get("models", []))
                 check("live_model_resident_before_idle", resident())
-                deadline = time.monotonic() + 6
-                while resident() and time.monotonic() < deadline:
-                    QTest.qWait(150)
-                check("live_model_idle_release", not resident())
-                warmed.clear()
-                companion.backend.keep_alive_seconds = 60
-                threading.Thread(target=warm_short, daemon=True).start()
-                wait_for(app, warmed.is_set, "model reloaded", timeout=30)
-                release = companion.backend.release_async()
-                wait_for(app, lambda: not release.is_alive(), "explicit model release")
+                companion.config.save = lambda: None
+                companion.toggle()
+                QTest.qWait(65000)
+                check("live_model_stays_resident_while_idle_and_paused", resident())
+                next(a for a in companion.menu.actions() if a.text() == tr("release_model")).trigger()
+                wait_for(app, lambda: companion.releasing_backend is None, "tray model release")
+                check("live_model_release_succeeded", companion.model_released and not companion.backend_error)
                 check("live_model_explicit_release", not resident())
+                companion.toggle()
+                QTest.qWait(300)
+                check("live_model_waits_for_next_edit", not resident())
+                type_draft("Please inspect the configu")
+                wait_for(app, lambda: companion.can_accept_tab(), "completion after manual release", timeout=90)
+                check("live_model_reloads_on_next_edit", resident() and companion.ready)
                 report["status"] = "PASS"
                 return 0
 
@@ -394,6 +394,18 @@ def main(argv=None) -> int:
             companion.toggle()
             wait_for(app, lambda: not companion.popup.isVisible(), "pause clears suggestion")
             check("pause_blocks_tab", not companion.can_accept_tab())
+            check("pause_keeps_model_loaded", not any(p.get("keep_alive") == 0 for p in server.payloads))
+            next(a for a in companion.menu.actions() if a.text() == tr("release_model")).trigger()
+            wait_for(app, lambda: companion.releasing_backend is None, "manual release from tray")
+            check("tray_release_succeeded", companion.model_released and not companion.backend_error)
+            count = len(server.payloads)
+            companion.toggle()
+            QTest.qWait(300)
+            check("release_stays_unloaded_until_edit", len(server.payloads) == count and not companion.ready)
+            type_draft("A new draft after manual release")
+            wait_for(app, lambda: companion.can_accept_tab(), "reload after manual release")
+            check("manual_release_recovers_completion", companion.ready and not companion.model_released)
+            check("requests_keep_model_resident", all(p["keep_alive"] == -1 for p in server.payloads if p.get("messages")))
             report["status"] = "PASS"
     except Exception as exc:
         report["errors"].append(f"{type(exc).__name__}: {exc}")
@@ -418,8 +430,7 @@ def main(argv=None) -> int:
             companion.ime_guard.close()
             companion.popup.close()
             companion.tray.hide()
-            if companion.backend:
-                companion.backend.close()
+            companion.shutdown_backend()
         window.close()
         server.shutdown()
         server.server_close()

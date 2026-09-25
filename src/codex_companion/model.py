@@ -215,16 +215,15 @@ def _local_url(base_url: str) -> str:
 
 class OllamaBackend:
     def __init__(self, base_url: str, model: str, transport: httpx.BaseTransport | None = None,
-                 *, keep_alive_seconds: int = 60, request_timeout: float = 8.0) -> None:
+                 *, request_timeout: float = 8.0) -> None:
         self.base_url = _local_url(base_url)
         self.model = model
         self.transport = transport
-        self.keep_alive_seconds = max(0, min(int(keep_alive_seconds), 3600))
         self.request_timeout = request_timeout
         self._network_lock = threading.Lock()
         self._lifecycle_lock = threading.Lock()
         self._active: set[threading.Event] = set()
-        self._activity_version = 0
+        self._closed = False
         # Never send localhost conversation data through HTTP(S)_PROXY.
         self.client = httpx.Client(
             transport=transport,
@@ -250,7 +249,7 @@ class OllamaBackend:
         return True, any(name == wanted for name, _ in self.list_models())
 
     def warm(self) -> None:
-        payload = {"model": self.model, "keep_alive": self.keep_alive_seconds, "stream": False,
+        payload = {"model": self.model, "keep_alive": -1, "stream": False,
                    "think": False, "options": {"num_predict": 1, "num_ctx": CONTEXT_TOKENS},
                    "messages": build_messages(SuggestionRequest([], "你好")), "format": continuation_schema("你好")}
         async def warm():
@@ -263,7 +262,8 @@ class OllamaBackend:
     def _operation(self, factory, cancel, timeout):
         local_cancel = threading.Event()
         with self._lifecycle_lock:
-            self._activity_version += 1
+            if self._closed:
+                return ""
             self._active.add(local_cancel)
         cancelled = lambda: cancel.is_set() or local_cancel.is_set()
         try:
@@ -278,25 +278,28 @@ class OllamaBackend:
             with self._lifecycle_lock:
                 self._active.discard(local_cancel)
 
-    def release_async(self) -> threading.Thread:
-        # Register the release now, before the background thread starts. A later
-        # resume/request supersedes it; an earlier warm cannot reload after it.
+    def release_async(self, on_done: Callable[[bool], None] | None = None) -> threading.Thread:
+        # Retire this backend before the worker starts. Delayed startup probes
+        # and queued requests must not reload it after the user releases it.
         with self._lifecycle_lock:
-            version = self._activity_version
+            self._closed = True
             for event in self._active:
                 event.set()
         def release():
-            with self._network_lock:
-                with self._lifecycle_lock:
-                    if version != self._activity_version:
-                        return
-                try:
+            ok = False
+            try:
+                with self._network_lock:
                     response = self.client.post(f"{self.base_url}/api/generate",
                                                 json={"model": self.model, "keep_alive": 0}, timeout=2)
                     response.raise_for_status()
+                    ok = True
                     log_event("model_released", shown=True)
-                except Exception as exc:
-                    log_event("model_release_failed", error_type=type(exc).__name__.lower())
+            except Exception as exc:
+                log_event("model_release_failed", error_type=type(exc).__name__.lower())
+            finally:
+                self.close()
+                if on_done is not None:
+                    on_done(ok)
         thread = threading.Thread(target=release, daemon=True)
         thread.start()
         return thread
@@ -304,7 +307,7 @@ class OllamaBackend:
     def suggest(self, request: SuggestionRequest, emit: Emit, cancel: threading.Event) -> str:
         if not can_continue(request.draft):
             return ""
-        payload = {"model": self.model, "stream": True, "keep_alive": self.keep_alive_seconds,
+        payload = {"model": self.model, "stream": True, "keep_alive": -1,
                    "think": False, "messages": build_messages(request), "format": continuation_schema(request.draft),
                    "options": {"temperature": 0, "num_predict": COMPLETION_TOKENS, "num_ctx": CONTEXT_TOKENS,
                                "repeat_penalty": 1.0}}
@@ -334,6 +337,7 @@ class OllamaBackend:
 
     def close(self) -> None:
         with self._lifecycle_lock:
+            self._closed = True
             for event in self._active:
                 event.set()
         self.client.close()
@@ -341,5 +345,4 @@ class OllamaBackend:
 
 def make_backend(config: AppConfig) -> OllamaBackend:
     return OllamaBackend(config.ollama_url, config.ollama_model,
-                         keep_alive_seconds=config.model_idle_seconds,
                          request_timeout=config.request_timeout_seconds)

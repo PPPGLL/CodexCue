@@ -61,6 +61,12 @@ def controller():
     companion.fallback_down = False
     companion.fallback_pending = False
     companion.ready = True
+    companion.backend = None
+    companion.backend_error = ""
+    companion.model_released = False
+    companion.releasing_backend = None
+    companion._model_release_thread = None
+    companion._backend_reconfigure_pending = False
     companion._tray_status = "ready"
     companion._tray_icons = {}
     companion.inserting = False

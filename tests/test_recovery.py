@@ -86,7 +86,7 @@ def test_total_deadline_also_bounds_a_stream_that_keeps_trickling():
         backend.close()
 
 
-def test_release_cancels_warm_before_unloading_and_uses_finite_keepalive():
+def test_release_cancels_warm_and_prevents_late_work_from_reloading():
     started, stopped = threading.Event(), threading.Event()
     payloads = []
     class Warm(httpx.AsyncByteStream):
@@ -100,7 +100,7 @@ def test_release_cancels_warm_before_unloading_and_uses_finite_keepalive():
     def handler(request):
         payloads.append(json.loads(request.content))
         return httpx.Response(200, stream=Warm()) if request.url.path == "/api/chat" else httpx.Response(200, json={})
-    backend = OllamaBackend("http://127.0.0.1:11434", "test", httpx.MockTransport(handler), keep_alive_seconds=30)
+    backend = OllamaBackend("http://127.0.0.1:11434", "test", httpx.MockTransport(handler))
     warm = threading.Thread(target=backend.warm)
     try:
         warm.start()
@@ -109,7 +109,9 @@ def test_release_cancels_warm_before_unloading_and_uses_finite_keepalive():
         release.join(1)
         warm.join(1)
         assert stopped.is_set() and not warm.is_alive() and not release.is_alive()
-        assert [p["keep_alive"] for p in payloads] == [30, 0]
+        backend.warm()  # A delayed startup probe must not undo manual release.
+        assert backend.suggest(SuggestionRequest([], "draft"), lambda _: None, threading.Event()) == ""
+        assert [p["keep_alive"] for p in payloads] == [-1, 0]
     finally:
         backend.close()
 

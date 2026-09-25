@@ -70,7 +70,8 @@ try {
             -RedirectStandardOutput (Join-Path $outputRoot ("desktop-{0:00}.stdout.log" -f $run)) `
             -RedirectStandardError (Join-Path $outputRoot ("desktop-{0:00}.stderr.log" -f $run))
         $null = $testProcess.Handle # Retain the handle so Windows PowerShell can read ExitCode after exit.
-        if (-not $testProcess.WaitForExit(90000)) {
+        $timeoutMs = if ($isLive) { 180000 } else { 90000 }
+        if (-not $testProcess.WaitForExit($timeoutMs)) {
             & "$env:SystemRoot\System32\taskkill.exe" /PID $testProcess.Id /T /F | Out-Null
             throw "Desktop acceptance $run timed out; its own test process tree was stopped."
         }

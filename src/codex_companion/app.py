@@ -16,7 +16,7 @@ from PySide6.QtCore import (QEasingCurve, QObject, QParallelAnimationGroup, QPoi
 from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout,
                                QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
-                               QLabel, QLineEdit, QListView, QMenu, QMessageBox, QPushButton, QSpinBox,
+                               QLabel, QLineEdit, QListView, QMenu, QMessageBox, QPushButton,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from .branding import app_icon, render_mark, tray_icon
@@ -37,6 +37,7 @@ class Bridge(QObject):
     finished = Signal(object, object)
     failed = Signal(object, str)
     warmed = Signal(object, bool, str)
+    model_released = Signal(object, bool)
     session_resolved = Signal(int, int, object)
     key_activity = Signal()
     mouse_activity = Signal(object, object)
@@ -618,14 +619,8 @@ class SettingsDialog(QDialog):
         self.ollama_model.addItems([name for name, _ in OLLAMA_MODEL_CHOICES])
         self.ollama_model.setCurrentText(config.ollama_model)
         self.ollama_model.currentTextChanged.connect(self.update_model_note)
-        self.model_idle = QSpinBox()
-        self.model_idle.setRange(0, 3600)
-        self.model_idle.setValue(config.model_idle_seconds)
-        self.model_idle.setSuffix(tr("seconds"))
-        self.model_idle.setToolTip(tr("idle_help"))
         for label, widget in [(tr("field_ollama_url"), self.ollama_url),
-                              (tr("field_local_model"), self.ollama_model),
-                              (tr("field_model_idle"), self.model_idle)]:
+                              (tr("field_local_model"), self.ollama_model)]:
             form.addRow(label, widget)
         layout.addLayout(form)
         self.model_note = QLabel()
@@ -835,8 +830,7 @@ class SettingsDialog(QDialog):
         from dataclasses import replace
 
         updates = dict(ollama_url=self.ollama_url.text().strip(),
-                       ollama_model=self.ollama_model.currentText().strip(),
-                       model_idle_seconds=self.model_idle.value())
+                       ollama_model=self.ollama_model.currentText().strip())
         try:
             replace(self.config, **updates).save()
         except OSError:
@@ -864,6 +858,7 @@ class Companion(QObject):
         self.bridge.finished.connect(self.on_finished)
         self.bridge.failed.connect(self.on_failed)
         self.bridge.warmed.connect(self.on_warmed)
+        self.bridge.model_released.connect(self.on_model_released)
         self.bridge.session_resolved.connect(self.on_session_resolved)
         self.bridge.key_activity.connect(self.note_typing)
         self.bridge.mouse_activity.connect(self.note_mouse_activity)
@@ -882,6 +877,10 @@ class Companion(QObject):
         self.context_verified = False
         self.active_context_label = ""
         self.backend = None
+        self.model_released = False
+        self.releasing_backend = None
+        self._model_release_thread = None
+        self._backend_reconfigure_pending = False
         self.cancel: threading.Event | None = None
         self.pending_insertion: tuple[str, str] | None = None
         self.ready = False
@@ -978,6 +977,7 @@ class Companion(QObject):
     def refresh_menu(self) -> None:
         tray_status = ("paused" if not self.config.enabled else
                        "error" if self.backend_error else
+                       "paused" if self.model_released and self.releasing_backend is None else
                        "ready" if self.ready else "loading")
         if tray_status != self._tray_status:
             self._tray_status = tray_status
@@ -988,8 +988,10 @@ class Companion(QObject):
         self.menu.addSeparator()
         status = self.menu.addAction(tr("enabled") if self.config.enabled else tr("paused"))
         status.triggered.connect(self.toggle)
-        model_label = (tr("model_ready") if self.ready else
+        model_label = (tr("model_releasing") if self.releasing_backend is not None else
                        tr("model_unavailable") if self.backend_error else
+                       tr("model_released") if self.model_released else
+                       tr("model_ready") if self.ready else
                        tr("model_loading_status"))
         model_status = self.menu.addAction(model_label)
         model_status.setEnabled(False)
@@ -1020,6 +1022,8 @@ class Companion(QObject):
             tooltip += f" | {counts}"
         self.tray.setToolTip(f"CodexCue · {tooltip}")
         self.menu.addSeparator()
+        release = self.menu.addAction(tr("release_model"), self.release_model)
+        release.setEnabled(isinstance(self.backend, OllamaBackend) and self.releasing_backend is None)
         self.menu.addAction(tr("open_logs"), self.open_log_folder)
         self.menu.addAction(tr("settings"), self.open_settings_from_shortcut)
         self.menu.addAction(tr("quit"), self.app.quit)
@@ -1035,12 +1039,37 @@ class Companion(QObject):
             self.context_verified = False
             self.context_resolution_state = "waiting"
         self.invalidate()
-        if not self.config.enabled and isinstance(self.backend, OllamaBackend):
-            self.backend.release_async()
-        elif self.config.enabled and not self.ready:
+        if self.config.enabled and not self.ready and not self.model_released:
             self.configure_backend()
         log_event("enabled_changed", enabled=self.config.enabled)
         self.refresh_menu()
+
+    def release_model(self) -> None:
+        if not isinstance(self.backend, OllamaBackend) or self.releasing_backend is not None:
+            return
+        backend = self.backend
+        self.backend = None
+        self.ready = False
+        self.model_released = True
+        self.releasing_backend = backend
+        self.backend_error = ""
+        self.text_armed = False
+        self.invalidate()
+        self._model_release_thread = backend.release_async(
+            lambda ok: self.bridge.model_released.emit(backend, ok))
+        self.refresh_menu()
+
+    def on_model_released(self, backend: object, ok: bool) -> None:
+        if backend is not self.releasing_backend:
+            return
+        self.releasing_backend = None
+        self.backend_error = "" if ok else tr("model_release_failed")
+        self.refresh_menu()
+        if not ok:
+            self.tray.showMessage(tr("release_model"), self.backend_error)
+        if self._backend_reconfigure_pending:
+            self._backend_reconfigure_pending = False
+            self.configure_backend()
 
     def open_log_folder(self) -> None:
         folder = log_path().parent
@@ -1168,7 +1197,11 @@ class Companion(QObject):
             self.configure_backend()
 
     def configure_backend(self) -> None:
+        if self.releasing_backend is not None:
+            self._backend_reconfigure_pending = True
+            return
         self.invalidate()
+        self.model_released = False
         self.ready = False
         self.backend_error = ""
         self.refresh_menu()
@@ -1180,6 +1213,14 @@ class Companion(QObject):
             self.tray.showMessage(tr("backend_settings"), str(exc))
             return
         old = self.backend
+        if (isinstance(old, OllamaBackend)
+                and (old.base_url, old.model) != (new_backend.base_url, new_backend.model)):
+            # Finish unloading the previous selection before loading another.
+            # This also keeps a rapid A -> B -> A switch from unloading the new A.
+            new_backend.close()
+            self._backend_reconfigure_pending = True
+            self.release_model()
+            return
         self.backend = new_backend
         log_event("backend_configured", backend="ollama")
         if old:
@@ -1192,9 +1233,13 @@ class Companion(QObject):
                 self.popup.show_text(tr("model_loading_popup"), self.bounds)
             def warm() -> None:
                 try:
+                    if new_backend is not self.backend:
+                        return
                     try:
                         _, installed = new_backend.available()
                     except Exception:
+                        if new_backend is not self.backend:
+                            return
                         executable = Path(self.config.ollama_executable)
                         if not self.config.ollama_executable or not executable.is_file():
                             raise
@@ -1210,6 +1255,8 @@ class Companion(QObject):
                         )
                         for _ in range(40):
                             time.sleep(.25)
+                            if new_backend is not self.backend:
+                                return
                             try:
                                 _, installed = new_backend.available()
                                 break
@@ -1219,6 +1266,8 @@ class Companion(QObject):
                             raise RuntimeError(tr("ollama_start_timeout"))
                     if not installed:
                         raise RuntimeError(tr("model_not_installed"))
+                    if new_backend is not self.backend:
+                        return
                     new_backend.warm()
                     self.bridge.warmed.emit(new_backend, True, "")
                 except Exception as exc:
@@ -1230,8 +1279,10 @@ class Companion(QObject):
         self.invalidate()
         if isinstance(self.backend, OllamaBackend):
             self.backend.release_async().join(timeout=2.5)
-        if self.backend:
+        elif self.backend:
             self.backend.close()
+        if self._model_release_thread is not None:
+            self._model_release_thread.join(timeout=2.5)
 
     def on_warmed(self, backend: object, ok: bool, message: str) -> None:
         if backend is not self.backend:
@@ -1508,6 +1559,8 @@ class Companion(QObject):
         if not self.text_armed or not self.state.draft.strip():
             return
         reason = self.editor_snapshot().rejection()
+        if reason == "ready" and self.model_released and self.releasing_backend is None:
+            self.configure_backend()
         if reason == "ready":
             reason = ("backend_unavailable" if not self.ready else
                       "already_requested" if not self.state.ready(now) else "ready")

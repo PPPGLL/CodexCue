@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from PySide6.QtWidgets import QApplication, QMenu, QPushButton
+from PySide6.QtWidgets import QApplication, QMenu, QPushButton, QSpinBox
 
 from codex_companion import i18n
 from codex_companion.app import Companion, SettingsDialog
@@ -25,6 +25,7 @@ def test_english_settings_and_tray_menu_follow_display_language(monkeypatch):
         assert dialog.windowTitle() == "CodexCue · Settings"
         assert dialog.ollama_url.text() == "http://127.0.0.1:11434"
         assert not hasattr(dialog, "cloud_key")
+        assert not dialog.findChildren(QSpinBox)
         assert dialog.model_note.text() == "Default: balances speed and quality."
         buttons = {button.text() for button in dialog.findChildren(QPushButton)}
         assert {"Save", "Cancel", "Download model"} <= buttons
@@ -48,6 +49,7 @@ def test_english_settings_and_tray_menu_follow_display_language(monkeypatch):
     tray = Tray()
     companion = SimpleNamespace(
         app=app, config=AppConfig(), backend_error="", ready=True,
+        backend=None, model_released=False, releasing_backend=None, release_model=lambda: None,
         context_verified=False, context_resolution_state="waiting",
         active_context_label="", tailer=None, context_ready=False,
         context_messages=[], _tray_status="ready", _tray_icons={},
@@ -59,5 +61,5 @@ def test_english_settings_and_tray_menu_follow_display_language(monkeypatch):
     labels = [action.text() for action in companion.menu.actions()]
     assert "Enabled" in labels
     assert "Using this draft only" in labels
-    assert {"Open diagnostic log folder", "Settings", "Quit"} <= set(labels)
+    assert {"Release model", "Open diagnostic log folder", "Settings", "Quit"} <= set(labels)
     assert tray.tooltip == "CodexCue · Using this draft only"
