@@ -83,11 +83,13 @@ def test_only_typed_user_and_final_assistant_turns_reach_both_models(tmp_path):
 
     def ollama_handler(http_request):
         captured["ollama"] = json.loads(http_request.content)
-        return httpx.Response(200, text='{"response":"补全","done":true}\n')
+        return httpx.Response(200, text=json.dumps({"message": {
+            "content": '{"continuation":"请继续补全"}'}, "done": True}) + '\n')
 
     def cloud_handler(http_request):
         captured["cloud"] = json.loads(http_request.content)
-        return httpx.Response(200, text='data: [DONE]\n\n')
+        return httpx.Response(200, text='data: ' + json.dumps({"choices": [{"delta": {
+            "content": '{"continuation":"请继续"}'}}]}) + '\n\ndata: [DONE]\n\n')
 
     ollama = OllamaBackend("http://127.0.0.1:11434", "qwen3:4b-instruct",
                            httpx.MockTransport(ollama_handler))
@@ -100,14 +102,11 @@ def test_only_typed_user_and_final_assistant_turns_reach_both_models(tmp_path):
         ollama.close()
         cloud.close()
 
-    prompt = captured["ollama"]["prompt"]
-    assert prompt.count("<|im_start|>user\n") == 1
-    assert prompt.count("<|im_start|>assistant\n") == 1
-    assert prompt.endswith("草稿：请继续<|im_end|>\n<|im_start|>assistant\n")
-    for item in expected:
-        assert f"{item.role}: {item.text}" in prompt
-    cloud_history = captured["cloud"]["messages"][1:-1]
-    assert cloud_history == [{"role": item.role, "content": item.text} for item in expected]
+    assert captured["ollama"]["messages"] == captured["cloud"]["messages"]
+    data = json.loads(captured["ollama"]["messages"][-1]["content"])
+    assert data["draft"] == "请继续"
+    assert data["background"] == [{"speaker": item.role, "text": item.text} for item in expected]
+    prompt = json.dumps(captured["ollama"], ensure_ascii=False)
     for unwanted in ("RUNTIME_", "REVIEW_TRANSCRIPT", "REVIEW_MULTIPART",
                      "FAKE_USER_HISTORY", "FAKE_ASSISTANT_HISTORY", "FAKE_TOOL_RESULT",
                      "HANDOFF_SUMMARY", "SECRET",

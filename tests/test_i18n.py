@@ -54,9 +54,10 @@ def test_english_settings_and_tray_menu_follow_display_language(monkeypatch):
         tray=tray, menu=QMenu(), toggle=lambda: None,
         open_log_folder=lambda: None, open_settings_from_shortcut=lambda: None,
     )
+    companion.completion_context = lambda: Companion.completion_context(companion)
     Companion.refresh_menu(companion)
     labels = [action.text() for action in companion.menu.actions()]
     assert "Enabled" in labels
-    assert "Context: click a Codex composer to detect" in labels
+    assert "Using this draft only" in labels
     assert {"Open diagnostic log folder", "Settings", "Quit"} <= set(labels)
-    assert tray.tooltip.startswith("CodexCue · Context:")
+    assert tray.tooltip == "CodexCue · Using this draft only"

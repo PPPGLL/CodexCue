@@ -20,7 +20,7 @@ class Popup:
     def hide(self):
         self.visible = False
 
-    def show_text(self, text, bounds, *, suggest=False):
+    def show_text(self, text, bounds, *, suggest=False, **kwargs):
         self.visible = True
         self.shown.append(text)
 
@@ -32,10 +32,11 @@ def controller():
     companion._test_app = app
     companion.app = app
     companion.config = SimpleNamespace(enabled=True)
-    companion.monitor = SimpleNamespace(generation=1, wake=lambda: None)
+    companion.monitor = SimpleNamespace(generation=1, wake=lambda: None, set_active=lambda _: None)
     companion.tailer = SimpleNamespace(revision=1, poll=lambda: False)
     companion.context_revision = 1
-    companion.context_messages = []
+    from codex_companion.sessions import Message
+    companion.context_messages = [Message("user", "Synthetic prior message")]
     companion.context_ready = True
     companion.context_verified = True
     companion.resolver = SimpleNamespace(generation=1, wake=lambda: None,
@@ -53,7 +54,6 @@ def controller():
     companion.input_activity_pending = False
     companion.last_activity_kind = "keyboard"
     companion.mouse_down = False
-    companion.mouse_probe_pending = False
     companion.awaiting_editor_click = False
     companion.pending_click_position = None
     companion.context_resolution_state = "waiting"
@@ -70,6 +70,24 @@ def controller():
     companion.last_codex_hwnd = 123
     companion.bounds = (100, 100, 200, 130)
     return companion
+
+
+def test_hook_activity_invalidates_tab_before_queued_ui_update():
+    companion = controller()
+    companion.tab_hook = SimpleNamespace(ready=True)
+    events = []
+    companion.bridge = SimpleNamespace(
+        key_activity=SimpleNamespace(emit=lambda: events.append("key")),
+        mouse_activity=SimpleNamespace(emit=lambda x, y: events.append((x, y))))
+
+    companion._hook_key_activity()
+    assert companion.tab_hook.ready is False
+    assert events == ["key"]
+
+    companion.tab_hook.ready = True
+    companion._hook_mouse_activity(10, 20)
+    assert companion.tab_hook.ready is False
+    assert events[-1] == (10, 20)
 
 
 def test_tray_reports_actual_user_and_assistant_context_counts():
@@ -293,6 +311,7 @@ def test_completion_appears_only_in_the_editor_that_produced_it(monkeypatch):
     assert not companion.popup.isVisible()
 
     companion.state.observe("请帮我写", 1, 1)
+    companion.last_read = ("请帮我写", companion.bounds)
     token = companion.state.start()
     foreground[0] = 123
     companion.on_finished(token, "诗")
@@ -336,10 +355,11 @@ def test_tab_inserts_from_verified_snapshot_without_sync_uia(monkeypatch):
 
 def test_late_context_from_previous_task_is_ignored():
     companion = controller()
+    previous = companion.context_messages[:]
     current = companion.tailer
     companion.on_context_changed(SimpleNamespace(), 9, ["旧任务"])
     assert companion.context_revision == 1
-    assert companion.context_messages == []
+    assert companion.context_messages == previous
 
     companion.on_context_changed(current, 2, ["当前任务"])
     assert companion.context_revision == 2
@@ -380,6 +400,8 @@ def test_switch_cannot_send_previous_task_context(monkeypatch, tmp_path):
     companion.on_context_changed(companion.tailer, 2,
                                  [Message("user", "新任务问题"),
                                   Message("assistant", "新任务答复")])
+    monkeypatch.setattr(companion_app.windows_input.user32, "GetForegroundWindow", lambda: 123)
+    companion.on_observed(1, ("请继续", companion.bounds), 123, 0.0)
     companion.start_request()
     assert [message.text for message in sent[0].messages] == ["新任务问题", "新任务答复"]
 
@@ -424,6 +446,9 @@ def test_auto_mode_scans_once_after_editor_click_not_each_key(monkeypatch):
 
     companion.note_mouse_activity(150, 115)  # Return to the composer.
     companion.tick()
+    assert calls == ["invalidate", "invalidate"]  # A coordinate is not focus proof.
+    companion.on_observed(1, ("旧草稿", companion.bounds), 123,
+                          companion.last_typing_at)
     assert calls == ["invalidate", "invalidate", "wake"]
 
     for _ in range(5):
@@ -523,3 +548,81 @@ def test_auto_mode_switches_to_uniquely_matched_task(monkeypatch, tmp_path):
 
     assert selected == [info.path]
     assert companion.context_verified
+
+
+def test_typing_recovers_unmatched_context_without_another_mouse_click(monkeypatch):
+    from codex_companion import windows_input
+
+    companion = controller()
+    companion.tailer = None
+    companion.context_verified = False
+    companion.context_resolution_state = "unresolved"
+    calls = []
+    companion.resolver.wake = lambda: calls.append(True)
+    monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 123)
+    companion.note_typing()
+    companion.on_observed(1, ("new draft", companion.bounds), 123, companion.last_typing_at)
+    assert calls == [True]
+    assert companion.state.draft == "new draft"
+    assert companion.context_resolution_state == "checking"
+    assert not companion.context_verified
+    # Continued edits must not starve the in-flight resolver by restarting it.
+    companion.note_typing()
+    companion.on_observed(1, ("new draft two", companion.bounds), 123, companion.last_typing_at)
+    assert calls == [True]
+
+
+def test_cold_start_recognizes_focused_blank_composer_without_typing(monkeypatch):
+    from codex_companion import windows_input
+
+    companion = controller()
+    companion.tailer = None
+    companion.context_verified = False
+    companion.text_armed = False
+    calls = []
+    companion.resolver.wake = lambda: calls.append(True)
+    monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 123)
+    companion.on_observed(1, ("", companion.bounds), 123, 0.0)
+    assert calls == [True]
+    assert companion.context_resolution_state == "checking"
+    assert not companion.text_armed
+
+
+def test_new_window_typing_cannot_reuse_previous_context(monkeypatch):
+    from codex_companion import windows_input
+
+    companion = controller()
+    monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 999)
+    companion.note_typing()
+    companion.on_observed(1, ("another draft", companion.bounds), 999, companion.last_typing_at)
+    assert not companion.context_verified
+    assert companion.context_resolution_state == "checking"
+
+
+def test_queued_key_signal_cannot_be_rearmed_by_timer(monkeypatch):
+    from codex_companion import windows_input
+
+    companion = controller()
+    companion.tab_hook = SimpleNamespace(ready=True)
+    companion.state.observe("draft", 1, 0)
+    companion.state.finish(companion.state.start(), " suffix")
+    companion.popup.show_text(" suffix", companion.bounds, suggest=True)
+    companion.bridge = SimpleNamespace(key_activity=SimpleNamespace(emit=lambda: None))
+    monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 123)
+    companion._hook_key_activity()  # Qt has not yet received note_typing().
+    companion.tick()
+    assert not companion.tab_hook.ready
+
+
+def test_popup_displays_the_entire_suffix_as_plain_text(monkeypatch):
+    from PySide6.QtCore import Qt
+    from codex_companion import app as companion_app
+
+    companion = controller()
+    popup = companion_app.SuggestionPopup()
+    monkeypatch.setattr(companion_app, "popup_position", lambda *_, **kwargs: None)
+    suffix = '<b>literal text</b> ' + 'long suffix ' * 6
+    popup.show_text(suffix, companion.bounds, suggest=True)
+    assert popup.label.text() == suffix
+    assert popup.label.textFormat() == Qt.PlainText
+    popup.close()

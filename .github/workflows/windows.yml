@@ -3,20 +3,63 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      draft_release:
+        description: Create a private draft Beta release after checks
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: windows-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
 jobs:
   test-build:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Test uv bootstrap, managed Python, Windows setup and build
+      - name: Bootstrap managed Python and locked dependencies
         shell: pwsh
         run: |
           $env:UV_PYTHON_PREFERENCE = 'only-managed'
-          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly -Build -ForceUvInstall
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly -ForceUvInstall
       - name: Test missing-uv branch with a mock installer
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_setup_bootstrap.ps1
       - run: .\.venv\Scripts\python.exe -m pytest
+      - name: Offline download recovery and install lifecycle
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_download.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_install.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build and package versioned release candidate
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly -Build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe scripts\package_release.py --output release-artifacts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_install.ps1 -Bundle release-artifacts\staging\CodexCue
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: CodexCue-windows
-          path: dist/CodexCue/
+          if-no-files-found: error
+          path: |
+            release-artifacts/*.zip
+            release-artifacts/*.txt
+            release-artifacts/sources/*.tar.gz
+      - name: Create draft Beta (never publish automatically)
+        if: github.event_name == 'workflow_dispatch' && inputs.draft_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $manifest = Get-Content release-artifacts\staging\CodexCue\release.json -Raw | ConvertFrom-Json
+          $tag = 'v' + $manifest.version
+          $assets = @((Get-ChildItem release-artifacts -File).FullName) + @((Get-ChildItem release-artifacts\sources -File).FullName)
+          gh release create $tag @assets --target $manifest.commit --draft --prerelease --title "CodexCue $($manifest.version)" --notes-file CHANGELOG.md
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

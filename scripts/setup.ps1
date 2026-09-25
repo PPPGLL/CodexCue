@@ -14,12 +14,14 @@ param(
     [switch]$Build,
     [switch]$Start,
     [string]$OllamaModel = 'qwen3:4b-instruct',
+    [ValidatePattern('^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$')][string]$OllamaVersion = '',
     [string]$ProxyUrl = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'download.ps1')
 $local = Join-Path $repo '.local'
 $ollamaDir = Join-Path $local 'ollama'
 $modelDir = Join-Path $local 'models'
@@ -72,6 +74,7 @@ function Wait-Ollama {
 }
 
 if ($env:OS -ne 'Windows_NT') { Fail 'Windows is required.' }
+if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { Fail 'Windows x64 is required.' }
 if (-not $AppOnly -and -not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { Fail 'curl.exe is required.' }
 if ($Build) {
     $packageExe = Join-Path $repo 'dist\CodexCue\CodexCue.exe'
@@ -113,7 +116,13 @@ if (-not $ollamaExe) {
 
 if (-not $ollamaExe -and -not $SkipOllama) {
     Say 'Downloading official Ollama Windows archive (about 1.5 GB).'
-    $base = 'https://github.com/ollama/ollama/releases/latest/download'
+    if (-not $OllamaVersion) {
+        $releaseArgs = @{ Uri = 'https://api.github.com/repos/ollama/ollama/releases/latest'; TimeoutSec = 60 }
+        if ($ProxyUrl) { $releaseArgs.Proxy = $ProxyUrl }
+        $OllamaVersion = (Invoke-RestMethod @releaseArgs).tag_name
+        if ($OllamaVersion -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$') { Fail 'Unexpected Ollama release tag.' }
+    }
+    $base = "https://github.com/ollama/ollama/releases/download/$OllamaVersion"
     $webArgs = @{ Uri = "$base/sha256sum.txt"; UseBasicParsing = $true; TimeoutSec = 60 }
     if ($ProxyUrl) { $webArgs.Proxy = $ProxyUrl }
     $manifest = Invoke-WebRequest @webArgs
@@ -123,16 +132,7 @@ if (-not $ollamaExe -and -not $SkipOllama) {
     $match = [regex]::Match($manifestText, '(?m)^([0-9a-f]{64})\s+\./ollama-windows-amd64\.zip\s*$')
     if (-not $match.Success) { Fail 'Official SHA256 manifest has no Windows archive entry.' }
     $expectedHash = $match.Groups[1].Value
-    $hasValidArchive = (Test-Path $archive) -and
-        ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -eq $expectedHash)
-    if (-not $hasValidArchive) {
-        $curlArgs = @('--fail', '--location', '--retry', '3', '--continue-at', '-', '--silent', '--show-error')
-        if ($ProxyUrl) { $curlArgs += @('--proxy', $ProxyUrl) }
-        & curl.exe @curlArgs --output $archive "$base/ollama-windows-amd64.zip"
-        if ($LASTEXITCODE -ne 0) { Fail 'Ollama archive download failed.' }
-    }
-    $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne $expectedHash) { Fail 'Ollama archive SHA256 mismatch.' }
+    Receive-VerifiedArchive -Url "$base/ollama-windows-amd64.zip" -Destination $archive -Sha256 $expectedHash -ProxyUrl $ProxyUrl
     Say 'Archive verified. Extracting Ollama.'
     New-Item -ItemType Directory -Path $ollamaDir -Force | Out-Null
     Expand-Archive -LiteralPath $archive -DestinationPath $ollamaDir -Force
@@ -174,6 +174,7 @@ if (-not $SkipModel) {
 $env:COMPANION_OLLAMA_EXE = $ollamaExe
 $env:COMPANION_OLLAMA_MODELS = if ($env:OLLAMA_MODELS) { $env:OLLAMA_MODELS } else { '' }
 $env:COMPANION_OLLAMA_MODEL = $model
+$env:COMPANION_SET_MODEL = if ($PSBoundParameters.ContainsKey('OllamaModel')) { '1' } else { '0' }
 & $python -m codex_companion.setup_config
 if ($LASTEXITCODE -ne 0) { Fail 'Could not save application configuration.' }
 }
