@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Expand rough revision requests into relevant details and checks while keeping
+  incomplete phrases concise and respecting analysis-only instructions.
+- Increase generation capacity, preserve complete requirements beyond 120
+  characters, and widen the popup for longer suggestions.
+- Cover long streamed suggestions, native insertion, and detailed live-model
+  requests in automated acceptance.
+
 ## 0.1.0b1
 
 First Beta release preparation for Windows x64.

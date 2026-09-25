@@ -497,13 +497,21 @@ class SuggestionPopup(QWidget):
             self.hide()
             return
         preview = text
+        # Detailed requests need a wider card so the full insert stays readable.
+        screen = QApplication.screenAt(QPoint(bounds[0], bounds[3])) or QApplication.primaryScreen()
+        width = 480 if len(preview) > 80 else 338
+        if screen is not None:
+            width = min(width, screen.availableGeometry().width() - 16)
+        self.setFixedWidth(width)
+        text_width = max(1, width - 112)
+        self.label.setFixedWidth(text_width)
         self.label.setTextFormat(Qt.PlainText)
         self.label.setText(preview)
         self.label.setToolTip(text if preview != text else "")
         # An explicit height keeps the card compact even when Qt's preferred
         # size assumes a wider label and would otherwise clip the text.
         wrapped = self.label.fontMetrics().boundingRect(
-            QRect(0, 0, 226, 1000), Qt.TextWordWrap, preview)
+            QRect(0, 0, text_width, 1000), Qt.TextWordWrap, preview)
         line_height = self.label.fontMetrics().lineSpacing()
         self.label.setFixedHeight(max(line_height, wrapped.height()))
         self.hint.setVisible(suggest)

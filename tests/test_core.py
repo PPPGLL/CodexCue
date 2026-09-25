@@ -311,7 +311,7 @@ def test_ollama_lists_installed_models_by_size():
 def test_cloud_sse_mock_and_https_gate():
     def handler(request):
         assert request.headers["authorization"] == "Bearer test-key"
-        assert json.loads(request.content)["max_tokens"] == 128
+        assert json.loads(request.content)["max_tokens"] >= 384
         chunks = ['{"continuation":"再', '试一次"}']
         return httpx.Response(200, text=''.join(
             'data: ' + json.dumps({"choices": [{"delta": {"content": chunk}}]}) + '\n\n'

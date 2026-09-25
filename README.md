@@ -2,6 +2,12 @@
 
 **Autocomplete for messages you write in Codex.** This small Windows app watches the focused composer in Codex Desktop or the Codex VS Code panel, reads a short slice of the current conversation, and suggests text to append to your draft. Press **Tab** to insert a suggestion. It never sends a message for you.
 
+Rough revision requests are expanded into a short paragraph of relevant details:
+what to inspect or improve, constraints to preserve, and how to check the result.
+For example, “这个表格的展示方式不太好” can continue with requests to check column
+alignment, legibility, spacing, and whether important fields remain easy to find.
+Incomplete phrases with too little context still receive a short continuation.
+
 The default backend is a local Ollama model. An OpenAI-compatible API is optional. This is an independent, unofficial companion; it does not use the Codex API or your Codex model quota.
 
 ![CodexCue settings with the Signal icon](design/selected-settings.png)
@@ -51,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -OllamaM
 | `qwen3:4b-instruct` | Default; currently tested on the project's RTX 4090. |
 | `qwen3:8b` | Larger model that may improve some suggestions; needs more memory and may be slower. |
 
-Open **Settings** from the tray to switch models. **Refresh model list** shows locally installed models; **Download model** installs the selected one only when clicked. The model field also accepts any Ollama model name. Settings checks that the selected model is installed before saving. Other model families use Ollama's chat template, so their ability to return a short suffix varies. Selecting a model does not download it automatically. Download size and speed depend on the chosen model and quantization.
+Open **Settings** from the tray to switch models. **Refresh model list** shows locally installed models; **Download model** installs the selected one only when clicked. The model field also accepts any Ollama model name. Settings checks that the selected model is installed before saving. Other model families use Ollama's chat template, so their ability to return a relevant continuation varies. Selecting a model does not download it automatically. Download size and speed depend on the chosen model and quantization.
 
 ### Let Codex set it up
 

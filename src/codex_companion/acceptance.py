@@ -30,7 +30,8 @@ from . import windows_input as wi
 
 TITLE_A = "补全功能的识别验证"  # Nine-character title, no visible message body.
 TITLE_B = "另一个测试任务"
-SUFFIX = " synthetic suffix"
+SUFFIX = (" synthetic suffix. Please clarify the intended behavior, keep unrelated interactions unchanged, "
+          "and verify both the normal path and failure feedback after the adjustment.")
 
 
 def write_fixture(home: Path, identity: str, title: str) -> None:
@@ -207,6 +208,9 @@ def main(argv=None) -> int:
                 report["model_results"] = []
                 drafts = ["先不要修改文件，请先", "Please inspect the configu", "这个函数的返回值应该",
                           "帮我比较这两个实现的", "Before running the tests, please", "这个问题解决了吗？"]
+                detailed_drafts = ["这个表格的展示方式不太好", "导出的时候总是不知道有没有成功，改一下",
+                                   "先不要动代码，帮我看看这个登录流程有什么问题"]
+                drafts.extend(detailed_drafts)
                 for draft in drafts:
                     began = time.monotonic()
                     type_draft(draft)
@@ -221,6 +225,12 @@ def main(argv=None) -> int:
                         check("complete_question_has_no_continuation", not suffix and not companion.popup.isVisible())
                     else:
                         check("live_model_suffix_visible", bool(suffix) and companion.can_accept_tab())
+                        if draft in detailed_drafts:
+                            check("rough_request_expanded", 60 <= len(suffix) <= 360)
+                            check("details_finish_a_sentence", suffix.endswith(("。", ".", "？", "?", "！", "!")))
+                            check("details_do_not_invent_numbers", not any(c.isdigit() for c in suffix))
+                        if draft.startswith("先不要动代码"):
+                            check("analysis_only_stays_analysis", "修改后" not in suffix and "调整后" not in suffix)
                         key(0x09)
                         wait_for(app, lambda: window.editor.text() == draft + suffix, "live suffix native paste")
                         check("live_model_paste_does_not_send", window.submissions == 0)
