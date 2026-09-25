@@ -1,0 +1,17 @@
+.venv/
+.uv-cache/
+.local/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+build/
+dist/
+.pytest-tmp/
+.tmp/
+*.log
+benchmark-results*.json
+.env
+.env.*
+config.json
+sessions/
+*.jsonl

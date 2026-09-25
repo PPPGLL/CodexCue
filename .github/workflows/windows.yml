@@ -1,0 +1,22 @@
+name: Windows tests and build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test uv bootstrap, managed Python, Windows setup and build
+        shell: pwsh
+        run: |
+          $env:UV_PYTHON_PREFERENCE = 'only-managed'
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -AppOnly -Build -ForceUvInstall
+      - name: Test missing-uv branch with a mock installer
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_setup_bootstrap.ps1
+      - run: .\.venv\Scripts\python.exe -m pytest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodexCue-windows
+          path: dist/CodexCue/

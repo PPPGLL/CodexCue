@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodexCue — Visual directions</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #e9e9e8; color: #222; font-family: "Segoe UI", Arial, sans-serif; }
+    .page { max-width: 1480px; margin: auto; padding: 32px 38px 48px; }
+    .intro { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+    .intro h1 { font-size: 31px; line-height: 1.1; margin: 0 0 9px; letter-spacing: -.04em; }
+    .intro p { max-width: 750px; margin: 0; font-size: 14px; line-height: 1.55; color: #555; }
+    .intro .note { text-align: right; font-size: 11px; line-height: 1.5; color: #777; min-width: 190px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+    .option { --accent: #222; --stage: #f5f5f4; --ink: #222; --muted: #747474; --stroke: #d0d0d0; --surface: #fff; min-width: 0; border: 1px solid #d0d0d0; border-radius: 22px; overflow: hidden; background: var(--surface); box-shadow: 0 10px 28px #1515150a; }
+    .option-head { padding: 20px 22px 16px; display: flex; align-items: start; gap: 14px; }
+    .number { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 9px; flex: 0 0 auto; color: var(--accent); border: 1px solid var(--stroke); font-size: 11px; font-weight: 800; letter-spacing: .06em; }
+    .option h2 { margin: -2px 0 3px; font-size: 23px; letter-spacing: -.035em; }
+    .option-head p { margin: 0; color: #666; font-size: 12px; line-height: 1.45; }
+    .identity { display: flex; align-items: center; gap: 14px; margin: 0 22px 17px; padding: 11px 12px; border-radius: 14px; background: #f5f5f5; }
+    .app-icon { width: 52px; height: 52px; flex: 0 0 auto; }
+    .app-icon svg, .tray-icon svg { width: 100%; height: 100%; display: block; }
+    .tray-wrap { display: flex; align-items: center; gap: 10px; margin-left: 4px; }
+    .tray-icon { width: 25px; height: 25px; position: relative; }
+    .tray-icon::after { content: ""; position: absolute; width: 6px; height: 6px; right: -2px; bottom: -2px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px #f5f5f5; }
+    .identity-label { color: #777; font-size: 11px; line-height: 1.3; }
+    .stage { position: relative; height: 204px; margin: 0 22px; padding: 13px; border: 1px solid var(--stroke); border-radius: 15px; background: var(--stage); color: var(--ink); overflow: hidden; }
+    .stage-bar { height: 19px; display: flex; gap: 5px; align-items: center; opacity: .62; }
+    .stage-bar i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
+    .stage-bar span { margin-left: 7px; font-size: 10px; letter-spacing: .05em; font-weight: 700; }
+    .conversation { padding: 11px 11px 0; font-size: 11px; color: var(--muted); }
+    .conversation strong { display: block; color: var(--ink); font-size: 12px; margin-bottom: 5px; font-weight: 650; }
+    .conversation .line { display: block; width: 66%; height: 5px; border-radius: 4px; background: currentColor; opacity: .3; margin-top: 7px; }
+    .conversation .line.short { width: 43%; }
+    .composer { position: absolute; left: 14px; right: 14px; bottom: 13px; height: 53px; border: 1px solid var(--stroke); border-radius: 11px; background: var(--surface); display: flex; align-items: center; padding: 10px 12px; font-size: 11px; color: var(--ink); }
+    .composer span { opacity: .46; margin-left: 2px; animation: caret 1s steps(2) infinite; }
+    .suggestion { position: absolute; z-index: 2; bottom: 71px; left: 28px; max-width: calc(100% - 56px); min-height: 37px; padding: 8px 10px; display: flex; align-items: center; gap: 8px; font-size: 11px; white-space: nowrap; border-radius: 9px; }
+    .suggestion .glyph { width: 15px; height: 15px; flex: 0 0 auto; display: grid; place-items: center; font-size: 12px; font-weight: 800; }
+    .suggestion .copy { overflow: hidden; text-overflow: ellipsis; }
+    .suggestion kbd { margin-left: 10px; font-family: inherit; font-size: 10px; font-weight: 700; white-space: nowrap; padding: 3px 6px; border-radius: 5px; }
+    .loading-copy { display: none; }
+    .option.is-loading .suggestion .copy, .option.is-loading .suggestion kbd { display: none; }
+    .option.is-loading .loading-copy { display: inline; }
+    .option.is-loading .suggestion .glyph { animation: pulse .9s ease-in-out infinite; }
+    .settings { display: flex; align-items: center; gap: 8px; margin: 13px 22px 0; padding: 10px 12px; min-height: 40px; border-radius: 9px; background: var(--stage); color: var(--muted); font-size: 10px; }
+    .settings strong { font-size: 10px; color: var(--ink); margin-right: auto; }
+    .setting-choice { border: 1px solid var(--stroke); border-radius: 5px; padding: 4px 7px; color: var(--ink); background: var(--surface); }
+    .meta { padding: 13px 22px 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #666; font-size: 10px; line-height: 1.35; }
+    .meta span { max-width: 52%; }
+    .actions { white-space: nowrap; display: flex; gap: 5px; }
+    button { cursor: pointer; font: inherit; font-size: 10px; padding: 6px 8px; border-radius: 6px; border: 1px solid #bbb; background: #fff; color: #222; }
+    button:hover { border-color: #555; }
+    @keyframes caret { 50% { opacity: 0; } }
+    @keyframes pulse { 50% { opacity: .25; transform: scale(.8); } }
+
+    .ink { --accent: #181d24; --stage: #f4f5f5; --ink: #1f252c; --muted: #929aa2; --stroke: #d0d7dc; --surface: #fff; }
+    .ink .identity { background: #f1f3f4; }
+    .ink .tray-icon::after { box-shadow: 0 0 0 2px #f1f3f4; }
+    .ink .suggestion { background: #fff; color: #20262d; border: 1px solid #b9c3c9; box-shadow: 0 4px 16px #1a27301a; }
+    .ink .suggestion .glyph { border: 1px solid #2d3940; border-radius: 4px; }
+    .ink .suggestion kbd { color: #3e464c; border: 1px solid #ccd3d7; background: #f6f7f7; }
+    .ink.playing .suggestion { animation: ink-in .10s ease-out both; }
+    @keyframes ink-in { from { opacity: .45; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    .midnight { --accent: #8576f2; --stage: #101321; --ink: #eeeefe; --muted: #8388a7; --stroke: #343955; --surface: #191d32; }
+    .midnight .identity { background: #181b2e; }
+    .midnight .tray-icon::after { box-shadow: 0 0 0 2px #181b2e; }
+    .midnight .identity-label, .midnight .option-head p { color: #8e94af; }
+    .midnight .option-head { background: #191c2e; color: #f4f3ff; }
+    .midnight .number { background: #292b4a; }
+    .midnight .suggestion { background: linear-gradient(125deg,#302752,#222640); color: #f5efff; border: 1px solid #8a78d2; box-shadow: 0 0 24px #8363cf55; }
+    .midnight .suggestion .glyph { color: #c5a7ff; }
+    .midnight .suggestion kbd { color: #e9dfff; background: #514273; border: 1px solid #8c71ba; }
+    .midnight.playing .suggestion { animation: midnight-in .18s cubic-bezier(.18,.8,.32,1) both; }
+    @keyframes midnight-in { from { opacity: .4; transform: scale(.96) translateY(4px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
+    .midnight.is-loading .suggestion .glyph { animation: orbit .85s linear infinite; }
+    @keyframes orbit { to { transform: rotate(360deg); } }
+
+    .studio { --accent: #cd6d55; --stage: #f5eee5; --ink: #352b2a; --muted: #a38c82; --stroke: #d8c4b5; --surface: #fffaf3; }
+    .studio .identity { background: #f7eee4; }
+    .studio .tray-icon::after { box-shadow: 0 0 0 2px #f7eee4; }
+    .studio .suggestion { background: #fff8ec; color: #422d2a; border: 1px solid #c8826d; box-shadow: 3px 4px 0 #d7b8a5; border-radius: 5px; }
+    .studio .suggestion .glyph { color: #cb684e; }
+    .studio .suggestion kbd { color: #8b5146; border: 1px solid #d7ae9c; background: #f9e7d9; }
+    .studio.playing .suggestion { animation: studio-in .15s cubic-bezier(.18,.92,.24,1.12) both; }
+    @keyframes studio-in { from { opacity: .6; transform: translateY(8px) rotate(-1deg); } to { opacity: 1; transform: none; } }
+
+    .signal { --accent: #d6ff36; --stage: #0d1113; --ink: #e7f0e5; --muted: #738077; --stroke: #323f36; --surface: #151e1a; }
+    .signal .identity { background: #111a15; }
+    .signal .tray-icon::after { box-shadow: 0 0 0 2px #111a15; }
+    .signal .option-head { background: #151b17; color: #e7f0e5; }
+    .signal .option-head p, .signal .identity-label { color: #87958a; }
+    .signal .number { background: #222e1c; }
+    .signal .suggestion { background: #151e18; color: #efffe5; border: 1px solid #a3cc36; border-radius: 3px; box-shadow: 0 4px 16px #0008; }
+    .signal .suggestion .glyph { color: #d6ff36; }
+    .signal .suggestion kbd { background: #d6ff36; color: #14200e; border: 1px solid #d6ff36; border-radius: 2px; }
+    .signal.playing .suggestion { animation: none; }
+    .signal.is-loading .suggestion .glyph { animation: signal-blink .55s steps(2) infinite; }
+    @keyframes signal-blink { 50% { opacity: 0; } }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .page { padding: 20px; } .intro { display: block; } .intro .note { text-align: left; margin-top: 12px; } }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" width="0" height="0" style="position:absolute">
+    <symbol id="icon-ink" viewBox="0 0 64 64"><rect x="2" y="2" width="60" height="60" rx="15" fill="#f7f8f8" stroke="#273039" stroke-width="3"/><path d="M14 19h36v25H29l-8 7v-7h-7z" fill="none" stroke="#273039" stroke-width="3.4" stroke-linejoin="round"/><path d="M22 29h20M22 36h12" stroke="#273039" stroke-width="3.4" stroke-linecap="round"/><path d="m38 34 5 2-5 2" fill="none" stroke="#273039" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-midnight" viewBox="0 0 64 64"><defs><linearGradient id="night-grad" x1="0" x2="1" y2="1"><stop stop-color="#6556df"/><stop offset="1" stop-color="#ae77e4"/></linearGradient></defs><rect x="2" y="2" width="60" height="60" rx="17" fill="url(#night-grad)"/><path d="M16 19h32v25H31l-9 7v-7h-6z" fill="#f4efff" opacity=".95"/><path d="m34 23 2.2 6.8L43 32l-6.8 2.2L34 41l-2.2-6.8L25 32l6.8-2.2z" fill="#8b6aeb"/></symbol>
+    <symbol id="icon-studio" viewBox="0 0 64 64"><rect x="2" y="2" width="60" height="60" rx="12" fill="#efe1d3"/><rect x="11" y="13" width="38" height="31" rx="5" fill="#c95f49"/><path d="M21 35h34v13H33l-7 7v-7h-5z" fill="#fff8ec"/><path d="M20 24h20M20 31h14" stroke="#fff8ec" stroke-width="3" stroke-linecap="round"/></symbol>
+    <symbol id="icon-signal" viewBox="0 0 64 64"><rect x="2" y="2" width="60" height="60" rx="8" fill="#111913" stroke="#d6ff36" stroke-width="3"/><path d="m17 20 14 12-14 12" fill="none" stroke="#d6ff36" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/><path d="M34 44h14" stroke="#d6ff36" stroke-width="5"/></symbol>
+  </svg>
+  <main class="page">
+    <div class="intro"><div><h1>Visual directions</h1><p>Four design explorations for CodexCue. The application uses Inkline's light interface and Signal's icon. Each card previews a possible icon, tray mark, suggestion, settings treatment, and motion.</p></div><div class="note">Click <b>Replay motion</b> or <b>Loading state</b> on any card.<br>All suggestion layouts sit outside the draft.</div></div>
+    <div class="grid">
+      <section class="option ink" data-theme="ink"><div class="option-head"><span class="number">01</span><div><h2>Inkline</h2><p>Quiet, native, almost invisible until needed.</p></div></div><div class="identity"><div class="app-icon"><svg><use href="#icon-ink"/></svg></div><div class="tray-wrap"><div class="tray-icon"><svg><use href="#icon-ink"/></svg></div><span class="identity-label">Tray mark<br>monochrome + status dot</span></div></div><div class="stage"><div class="stage-bar"><i></i><i></i><i></i><span>CODEX · COMPOSER</span></div><div class="conversation"><strong>Current task</strong>Make the setup approachable for new users.<span class="line"></span><span class="line short"></span></div><div class="suggestion"><span class="glyph">›</span><span class="copy">and verify each installation step.</span><span class="loading-copy">Thinking through the next phrase…</span><kbd>Tab</kbd></div><div class="composer">Please document the setup<span>│</span></div></div><div class="settings"><strong>Companion settings</strong><span>Inference</span><span class="setting-choice">Local Ollama ▾</span></div><div class="meta"><span>Motion: 100 ms soft rise · loading dots only</span><div class="actions"><button data-action="replay">Replay motion</button><button data-action="loading">Loading state</button></div></div></section>
+      <section class="option midnight" data-theme="midnight"><div class="option-head"><span class="number">02</span><div><h2>Midnight</h2><p>A distinct assistant presence with a restrained glow.</p></div></div><div class="identity"><div class="app-icon"><svg><use href="#icon-midnight"/></svg></div><div class="tray-wrap"><div class="tray-icon"><svg><use href="#icon-midnight"/></svg></div><span class="identity-label">Tray mark<br>violet + status dot</span></div></div><div class="stage"><div class="stage-bar"><i></i><i></i><i></i><span>CODEX · COMPOSER</span></div><div class="conversation"><strong>Current task</strong>Make the setup approachable for new users.<span class="line"></span><span class="line short"></span></div><div class="suggestion"><span class="glyph">✦</span><span class="copy">and verify each installation step.</span><span class="loading-copy">Finding the right continuation…</span><kbd>Tab</kbd></div><div class="composer">Please document the setup<span>│</span></div></div><div class="settings"><strong>Companion settings</strong><span>Inference</span><span class="setting-choice">Local Ollama ▾</span></div><div class="meta"><span>Motion: 180 ms glow reveal · orbit while loading</span><div class="actions"><button data-action="replay">Replay motion</button><button data-action="loading">Loading state</button></div></div></section>
+      <section class="option studio" data-theme="studio"><div class="option-head"><span class="number">03</span><div><h2>Studio</h2><p>Warm editorial cards with a tactile, crafted feel.</p></div></div><div class="identity"><div class="app-icon"><svg><use href="#icon-studio"/></svg></div><div class="tray-wrap"><div class="tray-icon"><svg><use href="#icon-studio"/></svg></div><span class="identity-label">Tray mark<br>terracotta + status dot</span></div></div><div class="stage"><div class="stage-bar"><i></i><i></i><i></i><span>CODEX · COMPOSER</span></div><div class="conversation"><strong>Current task</strong>Make the setup approachable for new users.<span class="line"></span><span class="line short"></span></div><div class="suggestion"><span class="glyph">✳</span><span class="copy">and verify each installation step.</span><span class="loading-copy">Composing a continuation…</span><kbd>Tab</kbd></div><div class="composer">Please document the setup<span>│</span></div></div><div class="settings"><strong>Companion settings</strong><span>Inference</span><span class="setting-choice">Local Ollama ▾</span></div><div class="meta"><span>Motion: 150 ms paper lift · pulse while loading</span><div class="actions"><button data-action="replay">Replay motion</button><button data-action="loading">Loading state</button></div></div></section>
+      <section class="option signal" data-theme="signal"><div class="option-head"><span class="number">04</span><div><h2>Signal</h2><p>High contrast and deliberately utilitarian.</p></div></div><div class="identity"><div class="app-icon"><svg><use href="#icon-signal"/></svg></div><div class="tray-wrap"><div class="tray-icon"><svg><use href="#icon-signal"/></svg></div><span class="identity-label">Tray mark<br>lime + status dot</span></div></div><div class="stage"><div class="stage-bar"><i></i><i></i><i></i><span>CODEX · COMPOSER</span></div><div class="conversation"><strong>Current task</strong>Make the setup approachable for new users.<span class="line"></span><span class="line short"></span></div><div class="suggestion"><span class="glyph">›_</span><span class="copy">and verify each installation step.</span><span class="loading-copy">Generating…</span><kbd>TAB</kbd></div><div class="composer">Please document the setup<span>│</span></div></div><div class="settings"><strong>Companion settings</strong><span>Inference</span><span class="setting-choice">Local Ollama ▾</span></div><div class="meta"><span>Motion: instant suggestion · blinking load cursor</span><div class="actions"><button data-action="replay">Replay motion</button><button data-action="loading">Loading state</button></div></div></section>
+    </div>
+  </main>
+  <script>
+    for (const option of document.querySelectorAll('.option')) {
+      option.querySelector('[data-action="replay"]').addEventListener('click', () => {
+        option.classList.remove('is-loading', 'playing');
+        void option.offsetWidth;
+        option.classList.add('playing');
+      });
+      option.querySelector('[data-action="loading"]').addEventListener('click', () => {
+        option.classList.toggle('is-loading');
+        option.classList.remove('playing');
+      });
+    }
+  </script>
+</body>
+</html>
