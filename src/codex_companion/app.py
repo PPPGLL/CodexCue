@@ -34,7 +34,7 @@ from . import windows_input
 class Bridge(QObject):
     observed = Signal(int, object, object, float)
     context_changed = Signal(object, int, object)
-    finished = Signal(object, str)
+    finished = Signal(object, object)
     failed = Signal(object, str)
     warmed = Signal(object, bool, str)
     session_resolved = Signal(int, int, object)
@@ -492,7 +492,8 @@ class SuggestionPopup(QWidget):
             self._appear.addAnimation(animation)
 
     def show_text(self, text: str, bounds: tuple[int, int, int, int] | None,
-                  *, suggest: bool = False, fallback: bool = False, draft_only: bool = False) -> None:
+                  *, suggest: bool = False, fallback: bool = False, draft_only: bool = False,
+                  kind: str = "short") -> None:
         if not bounds:
             self.hide()
             return
@@ -515,7 +516,9 @@ class SuggestionPopup(QWidget):
         line_height = self.label.fontMetrics().lineSpacing()
         self.label.setFixedHeight(max(line_height, wrapped.height()))
         self.hint.setVisible(suggest)
-        self.scope_hint.setVisible(suggest and draft_only)
+        badge = tr("kind_" + kind)
+        self.scope_hint.setText(badge + (" · " + tr("draft_only_hint") if draft_only else ""))
+        self.scope_hint.setVisible(suggest)
         self.adjustSize()
         point = popup_position(bounds, self.width(), self.height(), QApplication.screens(), fallback=fallback)
         if point is None:
@@ -635,6 +638,10 @@ class SettingsDialog(QDialog):
         for mode in ("auto", "context", "draft"):
             self.completion_mode.addItem(tr("mode_" + mode), mode)
         self.completion_mode.setCurrentIndex(max(0, self.completion_mode.findData(config.completion_mode)))
+        self.completion_style = InkComboBox()
+        for style in ("auto", "short"):
+            self.completion_style.addItem(tr("style_" + style), style)
+        self.completion_style.setCurrentIndex(max(0, self.completion_style.findData(config.completion_style)))
         self.model_idle = QSpinBox()
         self.model_idle.setRange(0, 3600)
         self.model_idle.setValue(config.model_idle_seconds)
@@ -647,6 +654,7 @@ class SettingsDialog(QDialog):
                               (tr("field_cloud_model"), self.cloud_model),
                               ("API Key", self.cloud_key),
                               (tr("field_completion_mode"), self.completion_mode),
+                              (tr("field_completion_style"), self.completion_style),
                               (tr("field_model_idle"), self.model_idle)]:
             form.addRow(label, widget)
         layout.addLayout(form)
@@ -879,6 +887,7 @@ class SettingsDialog(QDialog):
                        cloud_base_url=self.cloud_url.text().strip(),
                        cloud_model=self.cloud_model.text().strip(),
                        completion_mode=self.completion_mode.currentData(),
+                       completion_style=self.completion_style.currentData(),
                        model_idle_seconds=self.model_idle.value())
         try:
             replace(self.config, **updates).save()
@@ -1458,7 +1467,7 @@ class Companion(QObject):
 
     def show_suggestion(self, text: str) -> None:
         self.popup.show_text(text, self.bounds, suggest=True, fallback=self.fallback_mode,
-                             draft_only=self.completion_context() == [])
+                             draft_only=self.completion_context() == [], kind=getattr(text, "kind", "short"))
 
     def note_typing(self) -> None:
         # Delivered on the Qt thread after the hook records activity.
@@ -1627,7 +1636,7 @@ class Companion(QObject):
                   context_chars=sum(len(message.text) for message in context),
                   context_roles=("".join(message.role[0] for message in context)
                                  or "none"))
-        request = SuggestionRequest(context, token.draft)
+        request = SuggestionRequest(context, token.draft, getattr(self.config, "completion_style", "auto"))
         self.cancel = self.inference.submit(token, request, self.backend)
 
     def on_finished(self, token: RequestToken, text: str) -> None:

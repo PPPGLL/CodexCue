@@ -25,12 +25,20 @@ def test_both_backends_preserve_a_complete_detailed_request(cloud):
               "Show which values need attention and keep the entered values when validation fails. "
               "Check that the form still submits successfully after correcting an invalid field.")
     assert 120 < len(suffix) < MAX_SUGGESTION_CHARS
-    raw = json.dumps({"continuation": draft_anchor(draft) + suffix})
+    requirements = ["Clarify the labels and group related fields together.",
+                    "Show which values need attention and keep the entered values when validation fails.",
+                    "Check that the form still submits successfully after correcting an invalid field."]
+    calls = []
 
     def handler(request):
         body = json.loads(request.content)
+        calls.append(body)
         budget = body["max_tokens"] if cloud else body["options"]["num_predict"]
-        assert budget >= 384  # JSON framing and copied anchor must also fit.
+        if len(calls) == 1:
+            raw = json.dumps({"mode": "optimize", "focus": "form", "evidence": "improve this form"})
+        else:
+            assert budget >= 384
+            raw = json.dumps({"requirements": requirements})
         pieces = [raw[:55], raw[55:130], raw[130:]]
         if cloud:
             text = "".join("data: " + json.dumps({"choices": [{"delta": {"content": part}}]})
@@ -45,8 +53,9 @@ def test_both_backends_preserve_a_complete_detailed_request(cloud):
                if cloud else OllamaBackend("http://127.0.0.1:11434", "fixture", transport))
     emitted = []
     try:
-        result = backend.suggest(SuggestionRequest([], draft), emitted.append, threading.Event())
+        result = backend.suggest(SuggestionRequest([], draft, "auto"), emitted.append, threading.Event())
         assert result == suffix
+        assert result.kind == "optimize" and len(calls) == 2
         assert emitted == [suffix]  # No JSON fragments or incomplete clauses.
     finally:
         backend.close()
@@ -108,13 +117,21 @@ def test_shared_domain_terms_are_not_mistaken_for_copied_prose():
 
 @pytest.mark.parametrize("cloud", [False, True])
 def test_openers_do_not_turn_background_into_a_task(cloud):
-    transport = httpx.MockTransport(lambda _: pytest.fail("An opener should wait for the subject"))
+    def handler(request):
+        data = json.loads(json.loads(request.content)["messages"][-1]["content"])
+        raw = json.dumps({"continuation": data["anchor"] + "，请帮我看看。"})
+        body = ("data: " + json.dumps({"choices": [{"delta": {"content": raw}}]}) + "\n\ndata: [DONE]\n\n"
+                if cloud else json.dumps({"message": {"content": raw}, "done": True}))
+        return httpx.Response(200, text=body)
+    transport = httpx.MockTransport(handler)
     backend = (OpenAICompatibleBackend("https://example.com/v1", "fixture", "test-key", transport)
                if cloud else OllamaBackend("http://127.0.0.1:11434", "fixture", transport))
     try:
         for draft in ("你好", "你好世界", "Hello", "测试", "我想", "我希望你", "我觉得", "现在有个问题"):
+            emitted = []
             assert backend.suggest(SuggestionRequest([Message("assistant", "Earlier instructions")], draft),
-                                   lambda _: pytest.fail("No suggestion expected"), threading.Event()) == ""
+                                   emitted.append, threading.Event()) == "，请帮我看看。"
+            assert len(emitted) == 1 and emitted[0].kind == "short"
     finally:
         backend.close()
 

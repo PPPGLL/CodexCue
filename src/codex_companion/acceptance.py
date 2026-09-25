@@ -30,8 +30,11 @@ from . import windows_input as wi
 
 TITLE_A = "补全功能的识别验证"  # Nine-character title, no visible message body.
 TITLE_B = "另一个测试任务"
-SUFFIX = (" synthetic suffix. Please clarify the intended behavior, keep unrelated interactions unchanged, "
-          "and verify both the normal path and failure feedback after the adjustment.")
+SUFFIX = " the current settings."
+DETAIL_DRAFT = "页面的行间距看起来不一致，调整一下"
+DETAIL_ITEMS = ["检查页面标题与正文各自的行间距是否一致，明确哪些位置存在过密或过疏的问题，便于逐项调整。",
+                "比较相邻段落的留白关系，让同类内容保持清晰的阅读节奏，同时保留现有文字和布局顺序。",
+                "检查长文本换行和窗口缩小时的显示情况，确保文字不重叠、不被截断，阅读顺序仍然清楚。"]
 
 
 def write_fixture(home: Path, identity: str, title: str) -> None:
@@ -78,7 +81,15 @@ class ModelHandler(BaseHTTPRequestHandler):
             self.server.requests.append(json.loads(payload["messages"][-1]["content"]))
             self.server.release.wait(5)
         data = json.loads(payload["messages"][-1]["content"]) if payload.get("messages") else {"anchor": ""}
-        body = json.dumps({"message": {"content": json.dumps({"continuation": data["anchor"] + SUFFIX})}, "done": True}).encode() + b"\n"
+        fields = payload.get("format", {}).get("properties", {})
+        if "mode" in fields:
+            result = ({"mode": "check", "focus": "页面", "evidence": "行间距看起来不一致"}
+                      if data["draft"] == DETAIL_DRAFT else {"mode": "short", "focus": "", "evidence": ""})
+        elif "requirements" in fields:
+            result = {"requirements": DETAIL_ITEMS}
+        else:
+            result = {"continuation": data["anchor"] + SUFFIX}
+        body = json.dumps({"message": {"content": json.dumps(result)}, "done": True}).encode() + b"\n"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -207,9 +218,10 @@ def main(argv=None) -> int:
                 report["model"] = args.live_model
                 report["model_results"] = []
                 drafts = ["先不要修改文件，请先", "Please inspect the configu", "这个函数的返回值应该",
-                          "帮我比较这两个实现的", "Before running the tests, please", "这个问题解决了吗？"]
-                detailed_drafts = ["这个表格的展示方式不太好", "导出的时候总是不知道有没有成功，改一下",
-                                   "先不要动代码，帮我看看这个登录流程有什么问题"]
+                          "帮我比较这两个实现的", "Before running the tests, please", "这个问题解决了吗？",
+                          "我觉得", "你好"]
+                detailed_drafts = {"这个表格的展示方式不太好": "check", "导出的时候总是不知道有没有成功，改一下": "acceptance",
+                                   "先不要动代码，帮我看看这个登录流程有什么问题": "optimize"}
                 drafts.extend(detailed_drafts)
                 for draft in drafts:
                     began = time.monotonic()
@@ -218,6 +230,8 @@ def main(argv=None) -> int:
                              and companion.state.active is None, "real model completed", timeout=10)
                     suffix = companion.state.suggestion
                     row = {"draft": draft, "suffix": suffix, "combined": draft + suffix,
+                           "kind": getattr(suffix, "kind", ""),
+                           "requirements": len(getattr(suffix, "requirements", ())),
                            "end_to_end_ms": round((time.monotonic() - began) * 1000),
                            "shown": companion.popup.isVisible()}
                     report["model_results"].append(row)
@@ -226,7 +240,9 @@ def main(argv=None) -> int:
                     else:
                         check("live_model_suffix_visible", bool(suffix) and companion.can_accept_tab())
                         if draft in detailed_drafts:
-                            check("rough_request_expanded", 60 <= len(suffix) <= 360)
+                            check("rough_request_expanded", 80 <= len(suffix) <= 160)
+                            check("correct_detailed_mode", getattr(suffix, "kind", "") == detailed_drafts[draft])
+                            check("two_to_four_requirements", 2 <= len(getattr(suffix, "requirements", ())) <= 4)
                             check("details_finish_a_sentence", suffix.endswith(("。", ".", "？", "?", "！", "!")))
                             check("details_do_not_invent_numbers", not any(c.isdigit() for c in suffix))
                         if draft.startswith("先不要动代码"):
@@ -251,7 +267,7 @@ def main(argv=None) -> int:
                 threading.Thread(target=check_quality, daemon=True).start()
                 wait_for(app, quality_done.is_set, "quoted-rule model regressions", timeout=40)
                 report["context_grounding_results"] = quality_results
-                check("quoted_rules_do_not_become_suggestions", not quality_errors and len(quality_results) == 7
+                check("quoted_rules_do_not_become_suggestions", not quality_errors and len(quality_results) == 9
                       and all(row["status"] == "PASS" for row in quality_results))
 
                 # Verify the actual server unloads this model after idle and on
@@ -359,6 +375,16 @@ def main(argv=None) -> int:
             wait_for(app, lambda: companion.can_accept_tab(), "new task without history")
             check("draft_only_has_no_old_history", server.requests[-1]["background"] == [])
             check("draft_only_scope_is_visible", companion.popup.scope_hint.isVisible())
+
+            type_draft(DETAIL_DRAFT)
+            wait_for(app, lambda: companion.can_accept_tab(), "routed detailed suggestion")
+            detailed = companion.state.suggestion
+            check("mode_metadata_survives_worker_signal", getattr(detailed, "kind", "") == "check")
+            check("detailed_popup_not_clipped", companion.popup.label.text() == detailed and 80 <= len(detailed) <= 160)
+            check("detailed_tab_consumed", key(0x09) == 1)
+            wait_for(app, lambda: window.editor.text() == DETAIL_DRAFT + detailed, "detailed native paste")
+            check("badge_not_inserted", window.editor.text() == DETAIL_DRAFT + detailed)
+            QTest.qWait(300)
 
             window.showMaximized()
             window.editor.setFocus()

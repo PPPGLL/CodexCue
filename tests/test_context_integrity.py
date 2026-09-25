@@ -89,7 +89,7 @@ def test_only_typed_user_and_final_assistant_turns_reach_both_models(tmp_path):
     def cloud_handler(http_request):
         captured["cloud"] = json.loads(http_request.content)
         return httpx.Response(200, text='data: ' + json.dumps({"choices": [{"delta": {
-            "content": '{"continuation":"请继续"}'}}]}) + '\n\ndata: [DONE]\n\n')
+            "content": '{"continuation":"请继续补全"}'}}]}) + '\n\ndata: [DONE]\n\n')
 
     ollama = OllamaBackend("http://127.0.0.1:11434", "qwen3:4b-instruct",
                            httpx.MockTransport(ollama_handler))
