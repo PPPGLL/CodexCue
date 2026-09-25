@@ -864,18 +864,22 @@ class SettingsDialog(QDialog):
         self._commit_config("ollama")
 
     def _commit_config(self, backend: str) -> None:
-        self.config.backend = backend
-        self.config.ollama_url = self.ollama_url.text().strip()
-        self.config.ollama_model = self.ollama_model.currentText().strip()
-        self.config.cloud_base_url = self.cloud_url.text().strip()
-        self.config.cloud_model = self.cloud_model.text().strip()
-        self.config.completion_mode = self.completion_mode.currentData()
-        self.config.model_idle_seconds = self.model_idle.value()
+        from dataclasses import replace
+
+        updates = dict(backend=backend, ollama_url=self.ollama_url.text().strip(),
+                       ollama_model=self.ollama_model.currentText().strip(),
+                       cloud_base_url=self.cloud_url.text().strip(),
+                       cloud_model=self.cloud_model.text().strip(),
+                       completion_mode=self.completion_mode.currentData(),
+                       model_idle_seconds=self.model_idle.value())
         try:
-            self.config.save()
+            replace(self.config, **updates).save()
         except OSError:
             self.status.setText(tr("config_save_failed"))
             return
+        for key, value in updates.items():
+            setattr(self.config, key, value)
+        self.config.recovery_required = False
         self.accept()
 
 

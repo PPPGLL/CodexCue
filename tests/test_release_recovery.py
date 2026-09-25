@@ -2,6 +2,7 @@ import json
 
 import pytest
 from PySide6.QtCore import QProcess
+from PySide6.QtWidgets import QDialog
 
 from codex_companion.app import SettingsDialog
 from codex_companion.config import AppConfig
@@ -74,3 +75,14 @@ def test_setup_upgrade_preserves_backend_and_model(tmp_path, monkeypatch):
     monkeypatch.setenv("COMPANION_SET_MODEL", "1")
     main()
     assert AppConfig.load().ollama_model == "qwen3:4b-instruct"
+
+
+def test_failed_settings_save_does_not_change_running_config(qtbot, monkeypatch):
+    config = AppConfig(ollama_model="original:1")
+    dialog = SettingsDialog(config)
+    qtbot.addWidget(dialog)
+    dialog.ollama_model.setCurrentText("replacement:1")
+    monkeypatch.setattr(AppConfig, "save", lambda *_: (_ for _ in ()).throw(PermissionError()))
+    dialog._commit_config("ollama")
+    assert config.ollama_model == "original:1"
+    assert dialog.result() != QDialog.Accepted

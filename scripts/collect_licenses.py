@@ -7,11 +7,49 @@ import json
 from pathlib import Path, PurePosixPath
 import shutil
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import tarfile
+import time
 
 import httpx
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+
+
+def source_archive(client, repo: str, commit: str, destination: Path) -> str:
+    url = f"https://codeload.github.com/{repo}/tar.gz/{commit}"
+    cache = Path(__file__).resolve().parents[1] / ".local" / "upstream-sources"
+    cache.mkdir(parents=True, exist_ok=True)
+    cached = cache / destination.name
+    checksum = cached.with_suffix(cached.suffix + ".sha256")
+    if (cached.is_file() and checksum.is_file()
+            and hashlib.sha256(cached.read_bytes()).hexdigest() == checksum.read_text().strip()):
+        shutil.copy2(cached, destination)
+        return url
+    partial = cached.with_suffix(cached.suffix + ".part")
+    for attempt in range(3):
+        try:
+            started = time.monotonic()
+            with client.stream("GET", url) as response:
+                response.raise_for_status()
+                with partial.open("wb") as stream:
+                    for chunk in response.iter_bytes():
+                        if time.monotonic() - started > 300:
+                            raise TimeoutError("Source archive download exceeded five minutes")
+                        stream.write(chunk)
+            with tarfile.open(partial, "r:gz") as archive:
+                first = archive.next()
+                if first is None or first.name.split("/")[0] != f"{repo.split('/')[-1]}-{commit}":
+                    raise ValueError("Unexpected source archive root")
+            partial.replace(cached)
+            checksum.write_text(hashlib.sha256(cached.read_bytes()).hexdigest(), encoding="ascii")
+            shutil.copy2(cached, destination)
+            return url
+        except (httpx.HTTPError, OSError, TimeoutError, tarfile.TarError):
+            partial.unlink(missing_ok=True)
+            if attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+    raise RuntimeError("Source download did not complete")
 
 
 def runtime_distributions():
@@ -64,55 +102,41 @@ def collect(output: Path, sources: Path) -> dict:
 
     qt_version = metadata.version("PySide6")
     upstream = []
-    with httpx.Client(timeout=90, follow_redirects=True, headers={"User-Agent": "CodexCue-release"}) as client:
+    with httpx.Client(timeout=httpx.Timeout(45, connect=15), follow_redirects=True,
+                      transport=httpx.HTTPTransport(retries=2),
+                      headers={"User-Agent": "CodexCue-release"}) as client:
         for repo in ("qt/qtbase", "pyside/pyside-setup"):
             print(f"Collecting {repo} v{qt_version} license and source material...", flush=True)
             response = client.get(f"https://api.github.com/repos/{repo}/commits/v{qt_version}")
             response.raise_for_status()
             commit = response.json()["sha"]
-            response = client.get(f"https://api.github.com/repos/{repo}/git/trees/{commit}?recursive=1")
-            response.raise_for_status()
-            tree = response.json()
-            if tree.get("truncated"):
-                raise RuntimeError("Incomplete upstream license tree")
-            # Include attribution files and license/copyright notices throughout
-            # the source tree, including bundled third-party implementations.
-            selected = [entry for entry in tree["tree"] if entry["type"] == "blob" and (
-                entry["path"].startswith("LICENSES/")
-                or entry["path"].endswith("qt_attribution.json")
-                or any(word in PurePosixPath(entry["path"]).name.lower()
-                       for word in ("license", "copying", "copyright", "notice")))]
             prefix = repo.replace("/", "-")
-
-            def fetch(entry):
-                remote = f"https://raw.githubusercontent.com/{repo}/{commit}/{entry['path']}"
-                data = client.get(remote)
-                data.raise_for_status()
-                blob = data.content
-                digest = hashlib.sha1(b"blob " + str(len(blob)).encode() + b"\0" + blob).hexdigest()
-                if digest != entry["sha"]:
-                    raise RuntimeError("Upstream license blob hash mismatch")
-                target = output / prefix / entry["path"]
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(blob)
-
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                list(pool.map(fetch, selected))
             # Distribute corresponding upstream source beside the binary ZIP.
             # This also provides license files referenced indirectly by an
             # attribution JSON under less conventional filenames.
             source_name = f"{prefix}-{qt_version}-{commit[:12]}-source.tar.gz"
-            source_url = f"https://codeload.github.com/{repo}/tar.gz/{commit}"
             source_path = sources / source_name
-            with client.stream("GET", source_url) as response:
-                response.raise_for_status()
-                with source_path.open("wb") as stream:
-                    for chunk in response.iter_bytes():
-                        stream.write(chunk)
+            source_url = source_archive(client, repo, commit, source_path)
+            count = 0
+            with tarfile.open(source_path, "r|gz") as archive:
+                for member in archive:
+                    parts = PurePosixPath(member.name).parts
+                    if not parts or parts[0] != f"{repo.split('/')[-1]}-{commit}" or ".." in parts:
+                        raise ValueError("Unsafe upstream archive path")
+                    if not member.isfile() or len(parts) < 2:
+                        continue
+                    relative = PurePosixPath(*parts[1:])
+                    if not (relative.parts[0] == "LICENSES" or relative.name == "qt_attribution.json"
+                            or any(word in relative.name.lower() for word in ("license", "copying", "copyright", "notice"))):
+                        continue
+                    target = output / prefix / str(relative)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(archive.extractfile(member).read())
+                    count += 1
             upstream.append({"repository": repo, "version": qt_version, "commit": commit,
                              "source_file": source_name, "source_url": source_url,
                              "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-                             "notice_files": len(selected)})
+                             "notice_files": count})
     inventory = {"python": sys.version.split()[0], "packages": packages, "upstream": upstream}
     (output / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
     return inventory

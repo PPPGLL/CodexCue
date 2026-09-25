@@ -64,7 +64,7 @@ def test_settings_require_installed_model_before_saving(monkeypatch):
     app = QApplication.instance() or QApplication([])
     config = AppConfig()
     saved = []
-    monkeypatch.setattr(config, "save", lambda: saved.append(True))
+    monkeypatch.setattr(AppConfig, "save", lambda self: saved.append(True))
     gate = threading.Event()
     installed = [False]
 
