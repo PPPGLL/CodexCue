@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve conversation context when switching tasks, even after large tool logs; reuse recent task history and show when a Codex task summary is included.
 - Prevent Ollama's GPU helper processes from opening terminal windows when switching models or quitting CodexCue.
 - Use a 16K context window with model-token budgeting, fuller recent conversations, and existing Codex task summaries; newer requests take precedence over older summaries.
 - Keep short factual continuations that reuse a detail from the conversation instead of unnecessarily discarding the context and retrying.

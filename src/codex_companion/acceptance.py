@@ -256,6 +256,10 @@ def main(argv=None) -> int:
             context = companion.completion_context()
             check("cold_start_task_summary", any(m.kind == "task_summary" and "alpha" in m.text for m in context))
             check("replacement_history_excluded", all("PRIVATE_SYNTHETIC_REPLACEMENT" not in m.text for m in context))
+            alpha_tailer = companion.tailer
+            alpha_context = context[:]
+            check("tray_includes_task_summary", tr("message_counts_with_summary", users=1, assistants=1)
+                  in [action.text() for action in companion.menu.actions()])
 
             if args.live_model:
                 report["model"] = args.live_model
@@ -423,6 +427,14 @@ def main(argv=None) -> int:
             check("task_switch_no_alpha_context", all("alpha" not in m["text"]
                   for m in server.requests[-1]["background"]))
 
+            # While alpha is inactive, tool output grows beyond the former
+            # total scan bound without adding any user/assistant dialogue.
+            tool = json.dumps({"type": "response_item", "payload": {
+                "type": "function_call_output", "output": "x" * (1024 * 1024)}}) + "\n"
+            with alpha_tailer.path.open("a", encoding="utf-8") as stream:
+                for _ in range(17):
+                    stream.write(tool)
+
             write_fixture(home, "collision", TITLE_B)
             companion.note_navigation()
             type_draft("Compare again")
@@ -437,6 +449,8 @@ def main(argv=None) -> int:
                      and companion.tailer.path.name == "rollout-alpha.jsonl", "recovery by typing")
             wait_for(app, lambda: companion.can_accept_tab(), "recovered suggestion")
             check("recovery_without_editor_click", True)
+            check("switch_back_reuses_history_cursor", companion.tailer is alpha_tailer)
+            check("tool_growth_preserves_context_on_switch", companion.completion_context() == alpha_context)
 
             # An obsolete socket waits for headers; the next request must reach
             # the backend and complete before the first server handler is released.

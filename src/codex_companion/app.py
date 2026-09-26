@@ -27,14 +27,14 @@ from .diagnostics import log_event, log_path, setup_logging
 from .startup import hidden_console_options
 from .i18n import tr
 from .model import OllamaBackend, SuggestionRequest, make_backend
-from .sessions import SessionIndex, SessionTailer, match_visible_session
+from .sessions import SessionIndex, SessionTailer, SessionTailerCache, match_visible_session
 from .state import KEYBOARD_QUIET_SECONDS, EditorSnapshot, RequestToken, SuggestionState
 from . import windows_input
 
 
 class Bridge(QObject):
     observed = Signal(int, object, object, float)
-    context_changed = Signal(object, int, object)
+    context_changed = Signal(object, int, object, int)
     finished = Signal(object, object)
     failed = Signal(object, str)
     warmed = Signal(object, bool, str)
@@ -151,6 +151,7 @@ class SessionPoller:
         self.bridge = bridge
         self.condition = threading.Condition()
         self.tailer: SessionTailer | None = None
+        self.generation = 0
         self.stopping = False
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
@@ -158,6 +159,7 @@ class SessionPoller:
     def set_tailer(self, tailer: SessionTailer) -> None:
         with self.condition:
             self.tailer = tailer
+            self.generation += 1
             self.condition.notify()
 
     def stop(self) -> None:
@@ -166,7 +168,7 @@ class SessionPoller:
             self.condition.notify()
 
     def run(self) -> None:
-        previous: SessionTailer | None = None
+        previous_generation = -1
         while True:
             with self.condition:
                 while self.tailer is None and not self.stopping:
@@ -174,13 +176,17 @@ class SessionPoller:
                 if self.stopping:
                     return
                 tailer = self.tailer
+                generation = self.generation
+            tailer.cancelled = lambda current=generation: self.stopping or self.generation != current
             changed = tailer.poll()
-            if changed or tailer is not previous:
+            if generation != self.generation:
+                continue
+            if changed or generation != previous_generation:
                 self.bridge.context_changed.emit(
-                    tailer, tailer.revision, tailer.context())
-                previous = tailer
+                    tailer, tailer.revision, tailer.context(), generation)
+                previous_generation = generation
             with self.condition:
-                if self.tailer is tailer and not self.stopping:
+                if self.generation == generation and not self.stopping:
                     self.condition.wait(0.4)
 
 
@@ -908,6 +914,7 @@ class Companion(QObject):
         self.last_read: tuple[str, tuple[int, int, int, int]] | None = None
         self.tailer: SessionTailer | None = None
         self.context_revision = 0
+        self.session_tailers = SessionTailerCache()
         self.context_messages = []
         self.context_ready = False
         self.context_verified = False
@@ -1054,6 +1061,8 @@ class Companion(QObject):
             users = sum(message.role == "user" for message in self.context_messages if message.kind == "dialogue")
             assistants = sum(message.role == "assistant" for message in self.context_messages if message.kind == "dialogue")
             counts = tr("message_counts", users=users, assistants=assistants)
+            if any(message.kind == "task_summary" for message in self.context_messages):
+                counts = tr("message_counts_with_summary", users=users, assistants=assistants)
             count_status = self.menu.addAction(counts)
             count_status.setEnabled(False)
             tooltip += f" | {counts}"
@@ -1124,7 +1133,7 @@ class Companion(QObject):
         self.accept_hwnd = 0
         self.draft_dirty = True
         self.text_armed = was_armed
-        self.tailer = SessionTailer(path)
+        self.tailer = self.session_tailers.get(path)
         self.context_revision = 0
         self.context_messages = []
         self.context_ready = False
@@ -1453,7 +1462,9 @@ class Companion(QObject):
             self.popup.show_text(tr("model_loading_popup"), self.bounds)
 
     def on_context_changed(self, tailer: SessionTailer, revision: int,
-                           messages: list) -> None:
+                           messages: list, generation: int | None = None) -> None:
+        if generation is not None and generation != self.session_poller.generation:
+            return
         if tailer is not self.tailer:
             return
         self.context_revision = revision

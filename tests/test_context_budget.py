@@ -6,7 +6,9 @@ import httpx
 import pytest
 
 from codex_companion import model
-from codex_companion.sessions import CONTEXT_STORAGE_BYTES, Message, SessionTailer
+from codex_companion import sessions
+from codex_companion.sessions import (CONTEXT_STORAGE_BYTES, Message, SessionTailer,
+                                      SessionTailerCache)
 from codex_companion.token_budget import TokenCounter
 
 
@@ -146,6 +148,132 @@ def test_giant_message_obeys_storage_bound_on_prime_and_append(tmp_path):
     assert live.context() == loaded.context()
     assert sum(len(m.text.encode()) for m in live.context()) <= CONTEXT_STORAGE_BYTES
     assert live.context()[-1].text.endswith("KEEP THIS END")
+
+
+def test_tool_logs_cannot_push_dialogue_or_summary_out_on_reopen(tmp_path):
+    path = tmp_path / "tool-heavy.jsonl"
+    append(path, compact("Keep the blue background."), record("user", "Only adjust spacing."))
+    live = SessionTailer(path)
+    assert live.poll()
+    # More than the former 16 MiB total scan limit, but no new dialogue.
+    tool_output = {"type": "response_item", "payload": {
+        "type": "function_call_output", "output": "x" * (1024 * 1024)}}
+    append(path, *([tool_output] * 17), record("assistant", "Spacing updated."))
+    assert live.poll()
+    reopened = SessionTailer(path)
+    assert reopened.poll()
+    assert reopened.context() == live.context() == [
+        Message("assistant", "Keep the blue background.", "task_summary"),
+        Message("user", "Only adjust spacing."), Message("assistant", "Spacing updated.")]
+
+
+def test_switch_back_reads_only_new_records_and_handles_compaction(tmp_path, monkeypatch):
+    paths = [tmp_path / f"task-{i}.jsonl" for i in range(2)]
+    for i, path in enumerate(paths):
+        append(path, record("user", f"Task {i}"))
+    cache = SessionTailerCache()
+    first = cache.get(paths[0])
+    assert first.poll()
+    second = cache.get(paths[1])
+    assert second.poll()
+    append(paths[0], compact("Task 0 summarized"), record("user", "Latest correction"))
+    monkeypatch.setattr(sessions, "recent_context", lambda *_: pytest.fail("rescanned cached history"))
+    returned = cache.get(paths[0])
+    assert returned is first
+    assert returned.poll()
+    assert returned.context() == [Message("assistant", "Task 0 summarized", "task_summary"),
+                                   Message("user", "Latest correction")]
+    assert second.context() == [Message("user", "Task 1")]
+    assert not returned.poll()
+
+
+def test_evicted_context_reloads_without_changing_its_contents(tmp_path):
+    paths = [tmp_path / f"task-{i}.jsonl" for i in range(3)]
+    for i, path in enumerate(paths):
+        append(path, record("user", f"Task {i}"))
+    cache = SessionTailerCache(capacity=2)
+    old = cache.get(paths[0])
+    old.poll()
+    cache.get(paths[1]).poll()
+    assert cache.get(paths[0]) is old  # Touching it makes task 1 the oldest.
+    cache.get(paths[2]).poll()
+    assert len(cache.tailers) == 2
+    assert cache.get(paths[0]) is old
+    cache.get(paths[1]).poll()
+    cache.get(paths[2]).poll()
+    new = cache.get(paths[0])
+    assert new is not old
+    assert new.poll()
+    assert new.context() == old.context()
+
+
+@pytest.mark.parametrize("complete_before_prime", [False, True])
+def test_oversized_record_does_not_hide_adjacent_dialogue(tmp_path, monkeypatch, complete_before_prime):
+    # Lower only the record limit; exercise many chunk boundaries cheaply.
+    monkeypatch.setattr(sessions, "CONTEXT_RECORD_BYTES", 2048)
+    monkeypatch.setattr(sessions, "CONTEXT_CHUNK_BYTES", 256)
+    path = tmp_path / "oversized.jsonl"
+    append(path, record("user", "Keep this"))
+    raw = json.dumps({"type": "response_item", "payload": {
+        "type": "function_call_output", "output": "x" * 10000}}).encode() + b"\n"
+    with path.open("ab") as f:
+        f.write(raw if complete_before_prime else raw[:-10])
+    live = SessionTailer(path)
+    assert live.poll()
+    assert len(live.pending) <= 2048
+    if not complete_before_prime:
+        with path.open("ab") as f:
+            f.write(raw[-10:])
+    append(path, record("assistant", "Also keep this"))
+    assert live.poll()
+    reloaded = SessionTailer(path)
+    assert reloaded.poll()
+    assert live.context() == reloaded.context() == [Message("user", "Keep this"),
+                                                    Message("assistant", "Also keep this")]
+
+
+def test_oversized_pending_record_is_bounded_while_cached_task_grows(tmp_path, monkeypatch):
+    monkeypatch.setattr(sessions, "CONTEXT_RECORD_BYTES", 2048)
+    monkeypatch.setattr(sessions, "CONTEXT_CHUNK_BYTES", 256)
+    path = tmp_path / "growing.jsonl"
+    append(path, record("user", "Keep this"))
+    live = SessionTailer(path)
+    live.poll()
+    with path.open("ab") as f:
+        f.write(b'{"type":"response_item","payload":{"type":"function_call_output","output":"')
+        f.write(b"x" * 10000)
+    assert not live.poll()
+    assert len(live.pending) <= 2048
+    with path.open("ab") as f:
+        f.write(b'"}}\n')
+    append(path, record("user", "New request"))
+    assert live.poll()
+    assert live.context() == [Message("user", "Keep this"), Message("user", "New request")]
+
+
+def test_cached_tailer_detects_replaced_file_even_when_larger(tmp_path):
+    path = tmp_path / "original.jsonl"
+    append(path, record("user", "Old"))
+    tailer = SessionTailer(path)
+    tailer.poll()
+    replacement = tmp_path / "replacement.jsonl"
+    append(replacement, record("user", "Completely different new task"))
+    replacement.replace(path)
+    assert tailer.poll()
+    assert tailer.context() == [Message("user", "Completely different new task")]
+
+
+def test_cancelled_initial_scan_does_not_publish_incomplete_context(tmp_path):
+    path = tmp_path / "cancelled.jsonl"
+    append(path, record("user", "Keep this"))
+    tailer = SessionTailer(path)
+    tailer.cancelled = lambda: True
+    assert not tailer.poll()
+    assert not tailer.primed
+    assert tailer.offset == 0
+    tailer.cancelled = lambda: False
+    assert tailer.poll()
+    assert tailer.context() == [Message("user", "Keep this")]
 
 
 def test_full_messages_are_kept_when_they_fit():
