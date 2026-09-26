@@ -1,0 +1,62 @@
+name: Reusable Windows build
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to build; defaults to the event commit
+        type: string
+        default: ''
+    outputs:
+      artifact:
+        value: ${{ jobs.build.outputs.artifact }}
+permissions:
+  contents: read
+jobs:
+  build:
+    name: Test and package
+    runs-on: windows-latest
+    timeout-minutes: 30
+    outputs:
+      artifact: CodexCue-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bootstrap managed Python and locked dependencies
+        shell: pwsh
+        run: |
+          $env:UV_PYTHON_PREFERENCE = 'only-managed'
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -EnvironmentOnly -ForceUvInstall
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Check version consistency
+        run: .\.venv\Scripts\python.exe scripts\version.py check
+      - name: Test missing-uv branch with a mock installer
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_setup_bootstrap.ps1
+      - run: .\.venv\Scripts\python.exe -m pytest
+      - name: Offline download recovery and install lifecycle
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_download.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_install.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build and package this exact commit
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -EnvironmentOnly -Build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe scripts\package_release.py --output release-artifacts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_install.ps1 -Bundle release-artifacts\staging\CodexCue
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodexCue-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            release-artifacts/*.zip
+            release-artifacts/*.txt
+            release-artifacts/sources/*.tar.gz

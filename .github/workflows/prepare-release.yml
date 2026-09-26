@@ -1,0 +1,80 @@
+name: Prepare release
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: auto continues Beta, or uses feat/fix/breaking PR titles after a stable release
+        type: choice
+        default: auto
+        options: [auto, beta, stable, patch, minor, major]
+permissions:
+  contents: read
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_KIND: ${{ inputs.kind }}
+    steps:
+      - name: Require the main branch
+        env:
+          SOURCE_REF: ${{ github.ref }}
+        run: test "$SOURCE_REF" = refs/heads/main
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Calculate the next version
+        id: plan
+        run: python scripts/version.py prepare --kind "$RELEASE_KIND" --dry-run
+      - name: Find an existing release PR
+        id: existing
+        env:
+          RELEASE_BRANCH: ${{ steps.plan.outputs.branch }}
+        run: |
+          url=$(gh pr list --base main --head "$RELEASE_BRANCH" --state open --json url --jq '.[0].url // ""')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+      - name: Commit the version and open a draft PR
+        if: steps.existing.outputs.url == ''
+        id: create
+        env:
+          RELEASE_BRANCH: ${{ steps.plan.outputs.branch }}
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          if git ls-remote --exit-code origin "refs/heads/$RELEASE_BRANCH" >/dev/null; then
+            echo 'This release branch already exists. Review it before retrying; it will not be overwritten.' >&2
+            exit 1
+          fi
+          git switch -c "$RELEASE_BRANCH"
+          python scripts/version.py prepare --kind "$RELEASE_KIND" --notes "$RUNNER_TEMP/release-notes.md"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add pyproject.toml src/codex_companion/__init__.py uv.lock CHANGELOG.md .github/release-plan.json
+          git commit -m "chore(release): $RELEASE_VERSION"
+          git push origin "HEAD:refs/heads/$RELEASE_BRANCH"
+          {
+            printf 'Prepare CodexCue %s. Review the version and release notes before merging.\n\n' "$RELEASE_VERSION"
+            cat "$RUNNER_TEMP/release-notes.md"
+            printf '\n\nMerging creates a version tag and a draft Release after Windows checks pass. Publication remains manual.\n'
+          } > "$RUNNER_TEMP/release-pr.md"
+          url=$(gh pr create --draft --base main --head "$RELEASE_BRANCH" --title "chore(release): $RELEASE_VERSION" --body-file "$RUNNER_TEMP/release-pr.md")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+      - name: Run checks for the bot-created PR
+        env:
+          RELEASE_BRANCH: ${{ steps.plan.outputs.branch }}
+          RELEASE_PR: ${{ steps.existing.outputs.url || steps.create.outputs.url }}
+        run: |
+          # GITHUB_TOKEN-created PRs do not trigger pull_request workflows.
+          gh workflow run windows.yml --ref "$RELEASE_BRANCH"
+          printf 'Release PR: %s\n\nWindows checks were requested for its branch.\n' "$RELEASE_PR" >> "$GITHUB_STEP_SUMMARY"

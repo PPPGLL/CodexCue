@@ -78,3 +78,25 @@ def test_all_version_declarations_agree():
     lock = tomllib.loads((root / "uv.lock").read_text())
     assert project["project"]["version"] == __version__
     assert next(p for p in lock["package"] if p["name"] == "codexcue")["version"] == __version__
+
+
+@pytest.mark.parametrize("commit,version", [("other", "1"), ("abc", "2")])
+def test_ci_artifacts_must_match_the_requested_version(assets, commit, version):
+    root, _ = assets
+    with pytest.raises(ValueError, match="requested release"):
+        checker.check_ci(root, commit, version)
+
+
+def test_ci_assets_have_a_separate_scope_from_desktop_acceptance(assets):
+    root, receipt = assets
+    sources = root / "sources"
+    sources.mkdir()
+    for path in root.glob("*.tar.gz"):
+        path.rename(sources / path.name)
+    receipt.unlink()
+    assert checker.check_ci(root, "abc", "1")["scope"] == "ci_artifacts_only"
+    with pytest.raises(FileNotFoundError):
+        checker.check(root, receipt)
+    (root / "unexpected.txt").write_text("not in the manifest")
+    with pytest.raises(ValueError, match="upload list"):
+        checker.check_ci(root, "abc", "1")
