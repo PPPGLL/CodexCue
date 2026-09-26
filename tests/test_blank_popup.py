@@ -2,6 +2,7 @@ import time
 import threading
 from types import SimpleNamespace
 
+import pytest
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QApplication, QMenu
 
@@ -359,7 +360,121 @@ def test_tab_inserts_from_verified_snapshot_without_sync_uia(monkeypatch):
     companion.on_observed(1, ("请帮我写一首诗", companion.bounds),
                           123, companion.last_typing_at)
     assert companion.pending_insertion is None
+    assert companion.text_armed
+    assert companion.state.ready(time.monotonic())
     assert notices == []
+
+
+def ready_clipboard_retry(monkeypatch):
+    from codex_companion import windows_input
+
+    companion = controller()
+    companion.state.observe("请帮我", 1, 0)
+    companion.state.finish(companion.state.start(), "写一首诗")
+    companion.popup.show_text("写一首诗", companion.bounds, suggest=True)
+    monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 123)
+    return companion
+
+
+def test_busy_clipboard_retries_without_blocking_or_duplicate_paste(monkeypatch, qtbot):
+    from PySide6.QtCore import QTimer
+    from codex_companion import windows_input
+
+    companion = ready_clipboard_retry(monkeypatch)
+    available = []
+    attempts, inserted = [], []
+    def paste(text, clipboard, **kwargs):
+        attempts.append(text)
+        if not available:
+            raise windows_input.ClipboardBusyError()
+        inserted.append(text)
+        return True
+    monkeypatch.setattr(windows_input, "insert_text", paste)
+    companion.accept_suggestion()
+    companion.accept_suggestion()  # A second Tab queues another retry.
+    assert len(attempts) == 2 and not companion.inserting
+    assert companion.state.draft == "请帮我"
+    QTimer.singleShot(0, lambda: available.append(True))
+    qtbot.waitUntil(lambda: bool(inserted))
+    qtbot.wait(60)
+    assert inserted == ["写一首诗"]
+    assert companion.state.draft == "请帮我写一首诗"
+
+
+@pytest.mark.parametrize("change", ["draft", "suggestion", "generation", "focus", "typing", "activity"])
+def test_busy_clipboard_retry_cancels_stale_acceptance(monkeypatch, qtbot, change):
+    from codex_companion import windows_input
+
+    companion = ready_clipboard_retry(monkeypatch)
+    attempts = []
+    def paste(*args, **kwargs):
+        attempts.append(True)
+        raise windows_input.ClipboardBusyError()
+    monkeypatch.setattr(windows_input, "insert_text", paste)
+    companion.accept_suggestion()
+    if change == "draft":
+        companion.state.draft = "另一段草稿"
+    elif change == "suggestion":
+        companion.state.suggestion = "别的建议"
+    elif change == "generation":
+        companion.state.generation += 1
+    elif change == "focus":
+        monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 456)
+    elif change == "typing":
+        companion.last_typing_at = time.monotonic()
+    else:
+        companion.input_activity_pending = True
+    qtbot.wait(60)
+    assert len(attempts) == 1
+
+
+def test_busy_clipboard_retry_has_finite_budget(monkeypatch, qtbot):
+    from codex_companion import windows_input
+
+    companion = ready_clipboard_retry(monkeypatch)
+    attempts = []
+    def paste(*args, **kwargs):
+        attempts.append(True)
+        raise windows_input.ClipboardBusyError()
+    monkeypatch.setattr(windows_input, "insert_text", paste)
+    companion.accept_suggestion()
+    qtbot.waitUntil(lambda: len(attempts) == 11)
+    qtbot.wait(80)
+    assert len(attempts) == 11
+    assert not companion.inserting
+    assert companion.state.draft == "请帮我"
+
+
+def test_next_tab_waits_for_paste_readback_and_ignores_stale_editor(monkeypatch):
+    from codex_companion import windows_input
+
+    companion = controller()
+    companion.fallback_mode = False
+    companion.state.observe("草稿接上的文字", 1, 0)
+    companion.pending_insertion = ("草稿", "接上的文字")
+    companion.text_armed = False
+    companion.draft_dirty = True
+    companion.last_typing_at = time.monotonic()
+    companion.last_read = ("草稿", companion.bounds)
+    monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 123)
+    companion.on_observed(1, ("草稿", companion.bounds), 123, companion.last_typing_at)
+    assert companion.pending_insertion is not None
+    assert companion.draft_dirty and not companion.text_armed
+    companion.on_observed(1, ("草稿接上的文字", companion.bounds), 123, companion.last_typing_at)
+    assert companion.pending_insertion is None
+    assert companion.text_armed and not companion.draft_dirty
+
+
+def test_paste_mismatch_cannot_rearm_next_completion(monkeypatch):
+    from codex_companion import windows_input
+
+    companion = controller()
+    companion.pending_insertion = ("草稿", "接上的文字")
+    companion.text_armed = False
+    monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 123)
+    companion.on_observed(1, ("另一段文字", companion.bounds), 123, companion.last_typing_at)
+    assert companion.pending_insertion is None
+    assert not companion.text_armed
 
 
 def test_late_context_from_previous_task_is_ignored():

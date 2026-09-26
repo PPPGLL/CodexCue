@@ -27,7 +27,7 @@ from .diagnostics import log_event, log_path, setup_logging
 from .i18n import tr
 from .model import OllamaBackend, SuggestionRequest, make_backend
 from .sessions import SessionIndex, SessionTailer, match_visible_session
-from .state import EditorSnapshot, RequestToken, SuggestionState
+from .state import KEYBOARD_QUIET_SECONDS, EditorSnapshot, RequestToken, SuggestionState
 from . import windows_input
 
 
@@ -91,7 +91,7 @@ class DraftMonitor:
                 generation = self.generation
                 if self.active:
                     typing_at = self.last_typing_at()
-                    quiet = 0.15 if self.last_activity_kind() == "mouse" else 0.3
+                    quiet = 0.15 if self.last_activity_kind() == "mouse" else KEYBOARD_QUIET_SECONDS
                     quiet_remaining = quiet - (time.monotonic() - typing_at)
                     if quiet_remaining > 0:
                         self.changed.wait(quiet_remaining)
@@ -565,15 +565,39 @@ class InkComboBox(QComboBox):
         super().__init__()
         self.setObjectName("inkCombo")
         view = QListView(self)
+        view.viewport().setObjectName("inkComboViewport")
         view.setSpacing(2)
         view.setStyleSheet(
             "QListView {background:#FFFFFF;color:#26323B;"
             "border:1px solid #C6D0D4;border-radius:7px;padding:5px;outline:0;}"
-            "QListView::item {min-height:25px;padding:4px 9px;border-radius:4px;}"
+            "QWidget#inkComboViewport {background:#FFFFFF;}"
+            "QListView::item {background:#FFFFFF;min-height:25px;padding:4px 9px;border-radius:4px;}"
             "QListView::item:hover {background:#F1F4F5;}"
             "QListView::item:selected {background:#E8EEF0;color:#26323B;}"
         )
         self.setView(view)
+        # A combo's dropdown is a separate top-level QFrame. Give it and the
+        # scrolling viewport their own opaque surfaces, including row gaps and
+        # the area exposed while scrolling; the settings dialog cannot fill it.
+        popup = view.window()
+        popup.setObjectName("inkComboPopup")
+        popup.setStyleSheet("QFrame#inkComboPopup {background:#FFFFFF;border:0;}")
+        popup.setAttribute(Qt.WA_TranslucentBackground, False)
+        popup.setAttribute(Qt.WA_NoSystemBackground, False)
+        popup.setAutoFillBackground(True)
+
+    def showPopup(self) -> None:
+        # Qt's 150 ms roll effect shows a separate snapshot window and defers
+        # showing the actual list. Rapid close/reopen can leave that snapshot
+        # covering the popup; its surface is not styled by our white background.
+        # Skip the effect for this dropdown, restoring the app preference even
+        # if showing the popup fails. Keep Qt's normal selection/focus handling.
+        animated = QApplication.isEffectEnabled(Qt.UI_AnimateCombo)
+        QApplication.setEffectEnabled(Qt.UI_AnimateCombo, False)
+        try:
+            super().showPopup()
+        finally:
+            QApplication.setEffectEnabled(Qt.UI_AnimateCombo, animated)
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -724,10 +748,11 @@ class SettingsDialog(QDialog):
         selected = self.ollama_model.currentText()
         known = {name for name, _ in models}
         for name, size in models:
-            if self.ollama_model.findText(name) < 0:
-                self.ollama_model.addItem(name)
             index = self.ollama_model.findText(name)
-            self.ollama_model.setItemData(index, tr("installed_size", size=size / 1024 ** 3), Qt.ToolTipRole)
+            # Installed experiments are not recommendations. Keep the curated
+            # list; an explicitly typed custom model can still be checked/saved.
+            if index >= 0:
+                self.ollama_model.setItemData(index, tr("installed_size", size=size / 1024 ** 3), Qt.ToolTipRole)
         self.ollama_model.setCurrentText(selected)
         wanted = selected if ":" in selected else f"{selected}:latest"
         self.status.setText(tr("ollama_installed" if wanted in known else "ollama_missing",
@@ -975,13 +1000,14 @@ class Companion(QObject):
         self.bridge.mouse_activity.emit(x, y)
 
     def _hook_key_activity(self) -> None:
-        # Publish the quiet-period timestamp before Qt handles the queued
-        # signal, so a busy settings window cannot trigger a stale UIA read.
+        # Close the acceptance gate before Qt receives the key signal. With no
+        # debounce, a timestamp alone cannot prevent a stale suggestion's Tab.
         hook = getattr(self, "tab_hook", None)
         if hook:
             hook.ready = False
         self.last_typing_at = time.monotonic()
-        self.monitor.wake()
+        self.draft_dirty = True
+        self.input_activity_pending = True
         self.bridge.key_activity.emit()
 
     def refresh_menu(self) -> None:
@@ -1378,8 +1404,12 @@ class Companion(QObject):
                 delay = max(1, int((retry_after - (now - self.last_resolution_attempt_at)) * 1000) + 1)
                 QTimer.singleShot(delay, self, retry_if_current)
         if self.pending_insertion is not None:
-            previous, _suffix = self.pending_insertion
+            previous, suffix = self.pending_insertion
+            if read is not None and read[0] == previous and time.monotonic() - typing_at < .25:
+                self.draft_dirty = True
+                return  # The host may not have committed the paste to UIA yet.
             self.pending_insertion = None
+            self.text_armed = read is not None and read[0] == previous + suffix
             if read is not None and read[0] == previous:
                 self.tray.showMessage(tr("insert_not_applied"), tr("confirm_codex_focus"))
         waiting_for_commit = (self.awaiting_committed_edit and read is not None
@@ -1600,7 +1630,7 @@ class Companion(QObject):
             self.state.observe(draft, self.context_revision, time.monotonic())
             self.popup.hide()
 
-    def accept_suggestion(self) -> None:
+    def accept_suggestion(self, retry: int = 0) -> None:
         if not self.can_accept_tab():
             return
         suggestion = self.state.suggestion
@@ -1610,6 +1640,20 @@ class Companion(QObject):
         try:
             inserted = windows_input.insert_text(
                 suggestion, self.app.clipboard(), expected_hwnd=self.accept_hwnd)
+        except windows_input.ClipboardBusyError:
+            if retry < 10:
+                generation, hwnd = self.state.generation, self.accept_hwnd
+                activity_at = self.last_typing_at
+                def retry_paste() -> None:
+                    if (self.state.generation == generation and self.accept_hwnd == hwnd
+                            and self.state.suggestion == suggestion
+                            and self.state.draft == current and self.last_typing_at == activity_at):
+                        self.accept_suggestion(retry + 1)
+                QTimer.singleShot(20, self, retry_paste)
+                log_event("paste_retry", reason="clipboard_busy")
+            else:
+                log_event("paste_failed", reason="clipboard_busy")
+            return
         finally:
             self.inserting = False
         if inserted:
@@ -1619,9 +1663,14 @@ class Companion(QObject):
                 self.cancel.set()
             self.pending_insertion = None if used_fallback else (current, suggestion)
             self.fallback_mode = False
-            self.text_armed = False  # Wait for the next user edit before generating again.
+            self.text_armed = False  # Rearm only after UIA confirms the accepted suffix.
             self.awaiting_committed_edit = False
             self.last_typing_at = time.monotonic()
+            insertion_at = self.last_typing_at
+            def confirm_paste() -> None:
+                if self.pending_insertion is not None and self.last_typing_at == insertion_at:
+                    self.monitor.set_active(True)
+            QTimer.singleShot(250, confirm_paste)
             self.draft_dirty = True
             self.monitor.wake()
             self.state.observe(current + suggestion, self.context_revision, time.monotonic())

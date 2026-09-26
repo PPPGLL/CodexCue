@@ -63,7 +63,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -LiveMo
 | `windows_input.py` | 宿主编辑器、UIA、输入法、Tab 与剪贴板 | 焦点改变、输入法组词、粘贴回读、剪贴板恢复 |
 | `state.py` / `app.py` | 请求生命周期、工作线程、弹窗和设置 | 旧请求失效、设置保存失败、完整文本显示 |
 | `completion_prompt.py` / `model.py` | 统一续写提示词、输出校验和模型连接 | 单次请求、长短续写、模糊猜测、分析限制、重复内容、取消和总超时 |
-| `config.py` / `startup.py` | 配置、凭据和启动恢复 | 旧配置迁移、损坏备份、隐藏启动、再次打开设置 |
+| `config.py` / `startup.py` | 本地配置和启动恢复 | 损坏备份、隐藏启动、再次打开设置 |
 | `scripts/` | 环境、打包、安装维护和发布 | 下载恢复、清单完整性、升级回退和数据保留 |
 
 补全使用统一提示词，正常路径只有一次模型请求。格式损坏、空结果或复制原文时最多修复一次，共用总超时和取消信号。上下文自动使用已确认任务的近期对话，无法确认时只使用当前草稿；旧版模式设置在读取时忽略。过期结果不能复用到新草稿。
@@ -82,7 +82,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Packag
 
 ## 日常维护
 
-- **模型效果**：`scripts/check_completion_quality.py` 记录合成输入与模型输出；检查是否续写、是否重复、是否编造要求。长度和 JSON 正确只是基础条件。
+- **模型效果**：按[基准说明](BENCHMARK.md)运行 `scripts/benchmark_completion.py`，固定输入比较提示词与延迟，再审读是否续写、重复或编造要求。默认每次补一小段，Tab 插入经 UIA 确认后继续生成；没有固定键盘等待，但输入法、焦点和草稿确认仍须通过。
 - **运行指标**：`scripts/report_metrics.py` 统计等待时间、Tab 采用、请求失败和 UI 停顿。缺失样本记为未知，不能当作零错误。
 - **文案和视觉**：README 聚焦用途、开始使用和关键选项；技术细节放入本文与发布文档。动画使用合成文字，并支持减少动态效果。
 - **用户数据**：`.local/`、`.venv/`、`dist/`、日志、真实对话和本机配置只留在本机。回归用例使用新写的合成内容。

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+KEYBOARD_QUIET_SECONDS = 0.0
+
 
 @dataclass(frozen=True)
 class RequestToken:
@@ -44,7 +46,7 @@ class EditorSnapshot:
             return "editor_unavailable"
         if not self.context_allowed:
             return "context_unresolved"
-        if self.quiet_seconds < .3:
+        if self.quiet_seconds < KEYBOARD_QUIET_SECONDS:
             return "typing"
         return "ready"
 
@@ -52,7 +54,7 @@ class EditorSnapshot:
 class SuggestionState:
     """Pure state machine: late model output can never target a newer draft."""
 
-    def __init__(self, debounce_seconds: float = 0.3) -> None:
+    def __init__(self, debounce_seconds: float = KEYBOARD_QUIET_SECONDS) -> None:
         self.debounce_seconds = debounce_seconds
         self.draft = ""
         self.context_revision = 0

@@ -10,6 +10,7 @@ import time
 from codex_companion.config import DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL
 from codex_companion.model import OllamaBackend, SuggestionRequest
 from codex_companion.sessions import Message
+from codex_companion.state import KEYBOARD_QUIET_SECONDS
 
 SAMPLES = [
     "请帮我解释", "这个错误可能是", "我想把它改成", "能给我一个例子", "先检查一下",
@@ -38,8 +39,8 @@ def main() -> int:
         values = []
         for index in range(args.runs):
             start = time.perf_counter()
-            # Include the 300 ms keyboard quiet period, but not UI Automation or Qt overhead.
-            time.sleep(.3)
+            # Include the configured quiet period, but not UIA/Qt overhead.
+            time.sleep(KEYBOARD_QUIET_SECONDS)
             backend.suggest(SuggestionRequest([Message("assistant", "好的，我来帮你。")],
                                               SAMPLES[index % len(SAMPLES)]),
                             lambda _: None,

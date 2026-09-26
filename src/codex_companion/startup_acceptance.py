@@ -83,12 +83,24 @@ def main(argv=None) -> int:
             yield lambda: visible(dialog)
             check("second_launch_restores_same_dialog", companion._settings_dialog is dialog and visible(dialog))
             # A Qt dropdown is another native top-level window affected by SW_HIDE.
-            from PySide6.QtWidgets import QComboBox
+            from PySide6.QtWidgets import QApplication, QComboBox
             combo = dialog.findChild(QComboBox)
             combo.showPopup()
             yield lambda: visible(combo.view().window())
             check("settings_dropdown_native_visible", visible(combo.view().window()))
             combo.hidePopup()
+            original_model = combo.currentText()
+            for cycle in range(8):
+                combo.showPopup()
+                check(f"dropdown_reopen_{cycle}_immediately_visible", visible(combo.view().window()))
+                check(f"dropdown_reopen_{cycle}_no_animation_snapshot", not any(
+                    w.metaObject().className() == "QRollEffect" and w.isVisible()
+                    for w in QApplication.topLevelWidgets()))
+                yield lambda: True
+                combo.hidePopup()
+                yield lambda: True
+                check(f"dropdown_reopen_{cycle}_stays_closed", not visible(combo.view().window()))
+            check("dropdown_reopen_keeps_selected_model", combo.currentText() == original_model)
             dialog.reject()
             yield lambda: getattr(companion, "_settings_dialog", None) is None
             send_notification()

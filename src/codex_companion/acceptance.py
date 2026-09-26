@@ -32,6 +32,7 @@ from . import windows_input as wi
 TITLE_A = "补全功能的识别验证"  # Nine-character title, no visible message body.
 TITLE_B = "另一个测试任务"
 SUFFIX = " the current settings."
+NEXT_SUFFIX = " Check the failure path too."
 DETAIL_DRAFT = "页面的行间距看起来不一致，调整一下"
 DETAIL_ITEMS = ["检查页面标题与正文各自的行间距是否一致，明确哪些位置存在过密或过疏的问题，便于逐项调整。",
                 "比较相邻段落的留白关系，让同类内容保持清晰的阅读节奏，同时保留现有文字和布局顺序。",
@@ -85,6 +86,8 @@ class ModelHandler(BaseHTTPRequestHandler):
             self.server.release.wait(5)
         data = json.loads(payload["messages"][-1]["content"]) if payload.get("messages") else {"anchor": ""}
         suffix = "。" + "".join(DETAIL_ITEMS) if data.get("draft") == DETAIL_DRAFT else SUFFIX
+        if data.get("draft") == "Please inspect" + SUFFIX:
+            suffix = NEXT_SUFFIX
         result = {"continuation": data["anchor"] + suffix}
         body = json.dumps({"message": {"content": json.dumps(result)}, "done": True}).encode() + b"\n"
         self.send_response(200)
@@ -266,14 +269,15 @@ def main(argv=None) -> int:
                            "end_to_end_ms": round((time.monotonic() - began) * 1000),
                            "shown": companion.popup.isVisible()}
                     report["model_results"].append(row)
-                    if draft.endswith("？"):
-                        check("complete_question_has_no_continuation", not suffix and not companion.popup.isVisible())
-                    else:
+                    if suffix:
                         check("live_model_suffix_visible", bool(suffix) and companion.can_accept_tab())
                         check("live_model_keeps_user_voice", not any(text in suffix for text in
                               ("有什么我可以帮", "我可以帮你", "好的，我会", "我来帮你")))
+                        if draft.endswith("？"):
+                            check("complete_question_adds_user_followup", not suffix.startswith(("是的", "因为", "已经", "没有")))
                         if draft in detailed_drafts:
-                            check("rough_request_expanded", 60 <= len(suffix) <= 180)
+                            row["suffix_chars"] = len(suffix)
+                            check("rough_request_stays_concise", len(suffix) <= 80)
                             check("details_finish_a_sentence", suffix.endswith(("。", ".", "？", "?", "！", "!")))
                             check("details_do_not_invent_numbers", not any(c.isdigit() for c in suffix))
                         if draft.startswith("先不要动代码"):
@@ -282,6 +286,8 @@ def main(argv=None) -> int:
                         wait_for(app, lambda: window.editor.text() == draft + suffix, "live suffix native paste")
                         check("live_model_paste_does_not_send", window.submissions == 0)
                         QTest.qWait(300)  # Let the production clipboard restoration finish.
+                    else:
+                        check("live_model_suffix_visible", False)
                 # Reuse the actual packaged backend with adversarial synthetic
                 # history, so semantic regression is checked beyond text length.
                 from .quality_checks import check_context_grounding
@@ -320,6 +326,15 @@ def main(argv=None) -> int:
                 companion.toggle()
                 QTest.qWait(300)
                 check("live_model_waits_for_next_edit", not resident())
+                # The residency check deliberately idles for over a minute.
+                # Restore only our synthetic fixture before the final input;
+                # keep the foreground guard so no text reaches another app.
+                window.raise_()
+                window.activateWindow()
+                window.editor.setFocus()
+                wi.user32.SetForegroundWindow(target)
+                wait_for(app, lambda: wi.user32.GetForegroundWindow() == target,
+                         "fixture focus after idle (no input was sent elsewhere)", timeout=15)
                 type_draft("Please inspect the configu")
                 wait_for(app, lambda: companion.can_accept_tab(), "completion after manual release", timeout=90)
                 check("live_model_reloads_on_next_edit", resident() and companion.ready)
@@ -339,10 +354,49 @@ def main(argv=None) -> int:
             wait_for(app, lambda: app.clipboard().text() == clipboard_before, "clipboard restoration")
             check("clipboard_restored", True)
             check("tab_does_not_send", window.submissions == 0)
-            request_count = len(server.requests)
-            QTest.qWait(500)
-            check("own_paste_does_not_trigger_completion", len(server.requests) == request_count
-                  and not companion.text_armed and not companion.popup.isVisible())
+            wait_for(app, lambda: companion.can_accept_tab(), "next suggestion after accepted paste")
+            check("next_request_uses_accepted_text", server.requests[-1]["draft"] == "Please inspect" + SUFFIX)
+            check("next_popup_matches_suffix", companion.state.suggestion == NEXT_SUFFIX)
+            # Reproduce a clipboard reader that needs the Qt loop to progress.
+            # Hold only the lock; never replace the user's clipboard contents.
+            clipboard_locked = threading.Event()
+            release_clipboard = threading.Event()
+            def clipboard_reader():
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if wi.user32.OpenClipboard(ctypes.c_void_p(target)):
+                        try:
+                            clipboard_locked.set()
+                            release_clipboard.wait(2)
+                        finally:
+                            wi.user32.CloseClipboard()
+                        return
+                    time.sleep(.01)
+            reader = threading.Thread(target=clipboard_reader, daemon=True)
+            reader.start()
+            busy_attempts = []
+            set_clipboard = wi._set_unicode_clipboard
+            def observed_clipboard_write(text):
+                try:
+                    return set_clipboard(text)
+                except wi.ClipboardBusyError:
+                    busy_attempts.append(True)
+                    raise
+            try:
+                wait_for(app, clipboard_locked.is_set, "external clipboard reader")
+                with patch.object(wi, "_set_unicode_clipboard", observed_clipboard_write):
+                    check("second_tab_consumed", key(0x09) == 1)
+                    QTimer.singleShot(60, release_clipboard.set)
+                    wait_for(app, lambda: window.editor.text() == "Please inspect" + SUFFIX + NEXT_SUFFIX,
+                             "consecutive Tab paste readback")
+                check("busy_clipboard_retried", bool(busy_attempts))
+            finally:
+                release_clipboard.set()
+                reader.join(timeout=2)
+            QTest.qWait(300)
+            check("only_tab_inserts_next_suggestion", window.editor.text() == "Please inspect" + SUFFIX + NEXT_SUFFIX)
+            check("consecutive_tabs_preserve_clipboard", app.clipboard().text() == clipboard_before)
+            check("consecutive_tabs_do_not_send", window.submissions == 0)
 
             # Enter invalidates a pending request, then the synthetic host clears
             # its own editor. A late response must not revive the old suggestion.
@@ -435,11 +489,15 @@ def main(argv=None) -> int:
             # Reproduce a short popup becoming multiline before its entrance
             # ends. Read native physical window bounds against the real UIA
             # editor, including the frames after the obsolete animation ends.
+            # This direct popup probe bypasses suggestion state. Invalidate UIA
+            # callbacks so a late fallback read cannot hide its synthetic text.
+            companion.monitor.set_active(False)
             companion.invalidate()
             companion.text_armed = False
             editor_bounds = wi.read_draft()[1]
             popup = companion.popup
             samples = []
+            report["popup_geometry"] = {"editor": editor_bounds, "samples": samples}
             for initial, suggest in (("Loading model...", False), ("A short suggestion.", True)):
                 popup.hide()
                 popup.show_text(initial, editor_bounds, suggest=suggest)

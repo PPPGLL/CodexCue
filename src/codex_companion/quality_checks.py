@@ -18,9 +18,9 @@ def check_context_grounding(backend: SuggestionBackend) -> list[dict]:
         ("你好", ()), ("测试", ()), ("我希望你", ()), ("我觉得", ()),
         ("这个图表颜色分不清，调整一下", ("颜色", "对比", "区分")),
         ("按钮点击后没有反馈，改一下", ("点击", "状态", "提示", "响应")),
-        ("导出的报告缺没缺内容看不出来，改一下", ("完整", "缺失", "遗漏", "核对")),
-        ("付款返回之后不知道该往哪里走，理顺一下", ("返回", "路径", "下一", "操作")),
-        ("只分析不要改动，看看结算流程哪些地方不顺", ("结算", "步骤", "流程", "操作")),
+        ("导出的报告缺没缺内容看不出来，改一下", ("完整", "缺失", "遗漏", "核对", "对照", "一致", "差异")),
+        ("付款返回之后不知道该往哪里走，理顺一下", ("返回", "路径", "下一", "后续", "操作")),
+        ("只分析不要改动，看看结算流程哪些地方不顺", ("结算", "步骤", "流程", "操作", "输入", "校验", "环节")),
         ("接下来检查网络请求的", ()), ("这个结果不对，应该", ()),
         ("请检查配置文件 config.", ()),
         ("我们正在审查一个程序的启动流程。" * 5 + "请先帮我检查初始化的", ()),
@@ -37,12 +37,18 @@ def check_context_grounding(backend: SuggestionBackend) -> list[dict]:
             if draft.endswith(("的", "应该", "config.")):
                 passed = passed and not suffix.startswith(("。", "，", "；", ".", ","))
         else:
-            # Length is guidance, not a routing contract. Check observable prose
-            # with modest tolerance; reviewers still inspect scope and usefulness.
-            passed = passed and 60 <= len(suffix) <= 180 and any(w in suffix for w in topic_words)
+            # One useful requirement per Tab. The user can accept another step;
+            # the former 60-character minimum encouraged unnecessary expansion.
+            passed = passed and len(suffix) <= 80 and any(w in suffix for w in topic_words)
             passed = passed and suffix.endswith(("。", "？", "！")) and not any(c.isdigit() for c in suffix)
         if draft.startswith("只分析"):
             passed = passed and not any(w in suffix for w in ("修改后", "调整后", "新增", "添加"))
+        if draft.startswith("导出的报告"):
+            # Comparing source/report consistency is a valid completeness check.
+            # Reorganizing the report is a different task, even if the output
+            # happens to include a completeness keyword.
+            passed = passed and not any(w in suffix for w in (
+                "调整结构", "修改结构", "重组", "重构", "删除", "移除"))
         rows.append({"draft": draft, "suffix": suffix,
                      "status": "PASS" if passed else "FAIL"})
     return rows

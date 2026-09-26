@@ -7,6 +7,26 @@ from PySide6.QtCore import QCoreApplication, QMimeData, QTimer
 pytestmark = pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows only")
 
 
+def test_busy_clipboard_frees_buffer_without_waiting_or_modifying_clipboard(monkeypatch):
+    from codex_companion import windows_input as wi
+
+    freed = []
+    original_free = wi.kernel32.GlobalFree
+    def free(handle):
+        freed.append(handle)
+        return original_free(handle)
+    def unexpected(*args):
+        pytest.fail("Clipboard contention must return without waiting or writing")
+    monkeypatch.setattr(wi.user32, "OpenClipboard", lambda _: False)
+    monkeypatch.setattr(wi.kernel32, "GlobalFree", free)
+    monkeypatch.setattr(wi.user32, "EmptyClipboard", unexpected)
+    monkeypatch.setattr(wi.user32, "CloseClipboard", unexpected)
+    monkeypatch.setattr(wi.time, "sleep", unexpected)
+    with pytest.raises(wi.ClipboardBusyError):
+        wi._set_unicode_clipboard("Synthetic suffix")
+    assert len(freed) == 1
+
+
 def test_codexcue_settings_are_not_treated_as_codex_desktop():
     from codex_companion import windows_input as wi
 
@@ -247,6 +267,41 @@ def test_clipboard_change_during_paste_is_preserved(monkeypatch):
     QTimer.singleShot(300, app.quit)
     app.exec()
     assert clipboard.text() == "用户新复制的内容"
+
+
+@pytest.mark.parametrize("user_copy", [False, True])
+def test_consecutive_pastes_restore_original_or_new_user_clipboard(monkeypatch, user_copy):
+    from codex_companion import windows_input as wi
+
+    original = QMimeData()
+    original.setText("original")
+    original.setHtml("<b>original</b>")
+    contents = [original]
+    clipboard = SimpleNamespace(mimeData=lambda: contents[0], setMimeData=lambda data: contents.__setitem__(0, data))
+    sequence = [10]
+    timers = []
+    def set_text(text):
+        data = QMimeData()
+        data.setText(text)
+        contents[0] = data
+        sequence[0] += 1
+        return True
+    monkeypatch.setattr(wi, "_pending_clipboard_restore", None)
+    monkeypatch.setattr(wi, "_set_unicode_clipboard", set_text)
+    monkeypatch.setattr(wi, "_key", lambda *_: None)
+    monkeypatch.setattr(wi.user32, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(wi.user32, "GetClipboardSequenceNumber", lambda: sequence[0])
+    monkeypatch.setattr(QTimer, "singleShot", lambda _ms, fn: timers.append(fn))
+    assert wi.insert_text("first suffix", clipboard, expected_hwnd=123)
+    if user_copy:
+        set_text("new user copy")
+    assert wi.insert_text("second suffix", clipboard, expected_hwnd=123)
+    timers[0]()
+    assert contents[0].text() == "second suffix"
+    timers[1]()
+    assert contents[0].text() == ("new user copy" if user_copy else "original")
+    if not user_copy:
+        assert contents[0].html() == "<b>original</b>"
 
 
 def test_tab_hook_consumes_only_active_suggestion(monkeypatch):

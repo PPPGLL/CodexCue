@@ -49,9 +49,6 @@ def test_draft_monitor_reads_off_ui_thread(monkeypatch):
     monitor = DraftMonitor(Bridge(), lambda: last_key[0])
     try:
         monitor.set_active(True)
-        assert not read_started.wait(0.15)
-        last_key[0] = time.monotonic() - 1
-        monitor.wake()
         assert read_started.wait(2)
         assert observed_thread[0] != threading.get_ident()
         time.sleep(0.9)
