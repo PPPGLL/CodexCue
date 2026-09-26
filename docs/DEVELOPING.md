@@ -78,6 +78,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -LiveMo
 
 ## 构建与本机更新
 
+Windows 上启动 Ollama 服务需要可继承的隐藏控制台（`CREATE_NEW_CONSOLE` + `SW_HIDE`）。`CREATE_NO_WINDOW` 会让服务没有控制台，Ollama 的显卡探测子进程可能在加载或卸载模型时另开终端窗口。此设置只用于控制台服务，Qt 程序仍走已有的启动恢复逻辑。服务工作目录固定为 Ollama 所在目录，避免占用应用安装目录。
+
+本机 Ollama 0.34.4 / Qwen3 8B 的卸载、重载探针在修复前记录到 12 次子进程控制台显示事件，隐藏控制台复测为 0。`test_console_service_descendants_inherit_a_hidden_console` 验证连续两层子进程继承同一个隐藏控制台，服务自动恢复测试验证生产启动路径使用相同参数；测试不输入键盘内容。
+
 先提交代码，再构建到一个新的候选目录，保持正在使用的程序可用：
 
 ```powershell

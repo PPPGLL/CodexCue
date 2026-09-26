@@ -185,3 +185,38 @@ def test_switching_back_to_previous_model_waits_for_its_release(qtbot, monkeypat
         companion._model_release_thread.join(2)
         if companion.backend:
             companion.backend.close()
+
+
+def test_missing_service_starts_with_an_inheritable_hidden_console(qtbot, monkeypatch, tmp_path):
+    from codex_companion import app as app_module
+    calls, spawned = [], []
+    def handler(request):
+        calls.append(request.url.path)
+        if calls == ["/api/tags"]:
+            raise httpx.ConnectError("Service is stopped")
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "fixture:1"}]})
+        return httpx.Response(200, json={})
+    executable = tmp_path / "Ollama files" / "ollama.exe"
+    executable.parent.mkdir()
+    executable.touch()
+    companion = managed_controller(handler)
+    companion.config.ollama_executable = str(executable)
+    companion.config.ollama_models_dir = str(tmp_path / "models")
+    monkeypatch.setattr(app_module, "make_backend", lambda cfg:
+                        OllamaBackend(cfg.ollama_url, cfg.ollama_model, httpx.MockTransport(handler)))
+    monkeypatch.setattr(app_module.subprocess, "Popen", lambda args, **kwargs: spawned.append((args, kwargs)))
+    try:
+        companion.configure_backend()
+        qtbot.waitUntil(lambda: companion.ready)
+        assert len(spawned) == 1
+        args, options = spawned[0]
+        assert args == [str(executable), "serve"]
+        assert options["cwd"] == executable.parent
+        assert options["creationflags"] == app_module.subprocess.CREATE_NEW_CONSOLE
+        assert options["startupinfo"].wShowWindow == 0
+        assert options["startupinfo"].dwFlags & app_module.subprocess.STARTF_USESHOWWINDOW
+        assert options["env"]["OLLAMA_MODELS"] == companion.config.ollama_models_dir
+        assert calls == ["/api/tags", "/api/tags", "/api/show", "/api/chat"]
+    finally:
+        companion.backend.close()

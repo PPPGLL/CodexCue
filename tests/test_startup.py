@@ -39,3 +39,35 @@ def test_hidden_launch_is_normalized_and_checks_propagate_exit(monkeypatch, mode
 def test_source_relaunch_uses_module_entrypoint(monkeypatch):
     monkeypatch.delattr(startup.sys, "frozen", raising=False)
     assert startup.command(["--background"]) == [startup.sys.executable, "-m", "codex_companion", "--background"]
+
+
+def test_console_service_descendants_inherit_a_hidden_console(tmp_path):
+    """Reproduce Ollama-style helper spawning without a model or global input."""
+    import json
+    import subprocess
+    import sys
+
+    fixture = tmp_path / "console_service.py"
+    fixture.write_text('''import ctypes, json, subprocess, sys
+from pathlib import Path
+kernel = ctypes.WinDLL("kernel32")
+kernel.GetConsoleWindow.restype = ctypes.c_void_p
+user = ctypes.WinDLL("user32")
+user.IsWindowVisible.argtypes = [ctypes.c_void_p]
+hwnd = kernel.GetConsoleWindow()
+result = {"console": hwnd, "visible": bool(user.IsWindowVisible(hwnd))}
+depth = int(sys.argv[1])
+if depth:
+    subprocess.run([sys.executable, __file__, str(depth - 1)], check=True, timeout=10)
+Path(__file__).with_name(str(depth) + ".json").write_text(json.dumps(result))
+''', encoding="utf-8")
+    with subprocess.Popen([sys.executable, str(fixture), "2"], cwd=tmp_path,
+                          **startup.hidden_console_options(),
+                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.PIPE) as process:
+        _, error = process.communicate(timeout=30)
+    assert process.returncode == 0, error
+    states = [json.loads((tmp_path / f"{depth}.json").read_text()) for depth in range(3)]
+    assert all(state["console"] for state in states)
+    assert len({state["console"] for state in states}) == 1
+    assert not any(state["visible"] for state in states)

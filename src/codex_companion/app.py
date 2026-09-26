@@ -24,6 +24,7 @@ from .config import (AppConfig, OLLAMA_MODEL_CHOICES,
                      default_sessions_root,
                      existing_config_path)
 from .diagnostics import log_event, log_path, setup_logging
+from .startup import hidden_console_options
 from .i18n import tr
 from .model import OllamaBackend, SuggestionRequest, make_backend
 from .sessions import SessionIndex, SessionTailer, match_visible_session
@@ -1284,8 +1285,8 @@ class Companion(QObject):
                         if self.config.ollama_models_dir:
                             env["OLLAMA_MODELS"] = self.config.ollama_models_dir
                         subprocess.Popen(
-                            [str(executable), "serve"], env=env,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                            [str(executable), "serve"], env=env, cwd=executable.parent,
+                            **hidden_console_options(),
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                         )
