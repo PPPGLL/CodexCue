@@ -311,14 +311,73 @@ def test_tab_hook_marks_real_typing_before_editor_detection(monkeypatch):
     key = wi._KeyboardEvent()
     key.vkCode = 0x41
     assert hook._on_key(0, 0x100, ctypes.addressof(key)) == 0
-    key.flags = 0x10  # injected paste keys do not count as user typing
-    hook._on_key(0, 0x100, ctypes.addressof(key))
-    key.flags = 0
     key.vkCode = 0x10  # modifier keys do not change the draft
     hook._on_key(0, 0x100, ctypes.addressof(key))
     key.vkCode = 0x25  # navigation does not arm a blank editor
     hook._on_key(0, 0x100, ctypes.addressof(key))
     assert activity == [True]
+
+
+@pytest.mark.parametrize("vk,flags", [(0x41, 0x10), (0xe7, 0x10), (0xe7, 0), (0xe5, 0)])
+def test_external_input_reaches_draft_detection(monkeypatch, vk, flags):
+    from codex_companion import windows_input as wi
+
+    activity = []
+    hook = object.__new__(wi.TabHook)
+    hook.handle = 1
+    hook.ready = True
+    hook.on_activity = lambda: activity.append(True)
+    hook.on_focus_change = None
+    monkeypatch.setattr(wi.user32, "CallNextHookEx", lambda *_: 0)
+    monkeypatch.setattr(wi.user32, "GetAsyncKeyState", lambda _: 0)
+    event = wi._KeyboardEvent(vkCode=vk, flags=flags)
+    pointer = ctypes.addressof(event)
+    hook._on_key(0, 0x100, pointer)
+    hook._on_key(0, 0x101, pointer)
+    assert activity == [True]
+    assert not hook.ready
+
+
+@pytest.mark.parametrize("vk", [0x56, 0x43, 0x09, 0xe7])
+def test_own_shortcuts_do_not_rearm_or_accept_completion(monkeypatch, vk):
+    from codex_companion import windows_input as wi
+
+    emitted = []
+    monkeypatch.setattr(wi.user32, "keybd_event", lambda *args: emitted.append(args))
+    wi._key(vk)
+    wi._key(vk, True)
+    hook = object.__new__(wi.TabHook)
+    hook.handle = 1
+    hook.ready = True
+    hook.on_activity = lambda: pytest.fail("Own paste must not trigger another completion")
+    hook.on_focus_change = lambda: pytest.fail("Own shortcut must not invalidate focus")
+    hook.should_accept = lambda: pytest.fail("Own shortcut must not accept a suggestion")
+    monkeypatch.setattr(wi.user32, "CallNextHookEx", lambda *_: 0)
+    for key, _scan, flags, tag in emitted:
+        assert tag != 0
+        event = wi._KeyboardEvent(vkCode=key, flags=0x10, dwExtraInfo=tag)
+        hook._on_key(0, 0x101 if flags & 2 else 0x100, ctypes.addressof(event))
+    assert hook.ready
+
+
+@pytest.mark.parametrize("vk", [0x09, 0x21, 0x22])
+def test_external_injected_navigation_invalidates_focus(monkeypatch, vk):
+    from codex_companion import windows_input as wi
+
+    navigation = []
+    hook = object.__new__(wi.TabHook)
+    hook.handle = 1
+    hook.ready = True
+    hook.pressed = False
+    hook.on_activity = lambda: pytest.fail("Navigation must not arm completion")
+    hook.on_focus_change = lambda: navigation.append(True)
+    hook.should_accept = lambda: pytest.fail("Ctrl navigation must not accept")
+    monkeypatch.setattr(wi.user32, "CallNextHookEx", lambda *_: 0)
+    monkeypatch.setattr(wi.user32, "GetAsyncKeyState", lambda key: 0x8000 if key == 0x11 else 0)
+    event = wi._KeyboardEvent(vkCode=vk, flags=0x10)
+    hook._on_key(0, 0x100, ctypes.addressof(event))
+    assert navigation == [True]
+    assert not hook.ready
 
 
 def test_ctrl_tab_requests_context_switch_without_accepting_suggestion(monkeypatch):

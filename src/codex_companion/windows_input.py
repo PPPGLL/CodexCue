@@ -283,8 +283,14 @@ def cursor_position() -> tuple[int, int] | None:
     return point.x, point.y
 
 
+# Ignore our own clipboard shortcuts without ignoring input from IMEs, voice
+# typing, accessibility software, or remote keyboards.
+_OWN_INPUT_TAG = 0x43435545
+user32.keybd_event.argtypes = (wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t)
+
+
 def _key(vk: int, up: bool = False) -> None:
-    user32.keybd_event(vk, 0, 2 if up else 0, 0)
+    user32.keybd_event(vk, 0, 2 if up else 0, _OWN_INPUT_TAG)
 
 
 def copy_draft_fallback(clipboard) -> str | None:
@@ -486,13 +492,15 @@ class TabHook(_LowLevelHook):
         if code < 0:
             return user32.CallNextHookEx(self.handle, code, message, pointer)
         event = ctypes.cast(pointer, ctypes.POINTER(_KeyboardEvent)).contents
-        if (message in (0x100, 0x104) and not (event.flags & 0x10)
+        if event.flags & 0x10 and event.dwExtraInfo == _OWN_INPUT_TAG:
+            return user32.CallNextHookEx(self.handle, code, message, pointer)
+        if (message in (0x100, 0x104)
                 and getattr(self, "on_focus_change", None)
                 and event.vkCode in (0x21, 0x22)
                 and user32.GetAsyncKeyState(0x11) & 0x8000):
             self.ready = False
             self.on_focus_change()
-        if (message in (0x100, 0x104) and not (event.flags & 0x10)
+        if (message in (0x100, 0x104)
                 and _may_change_text(event.vkCode) and self.on_activity):
             if hasattr(self, "ready"):
                 self.ready = False
@@ -510,7 +518,7 @@ class TabHook(_LowLevelHook):
                         return 1
                 # Tab that was not accepted (including Shift+Tab) can move focus
                 # within the same window. HWND equality no longer proves focus.
-                if not (event.flags & 0x10) and getattr(self, "on_focus_change", None):
+                if getattr(self, "on_focus_change", None):
                     self.ready = False
                     self.on_focus_change()
             elif message in (0x101, 0x105) and self.pressed:  # key up
@@ -519,7 +527,7 @@ class TabHook(_LowLevelHook):
         return user32.CallNextHookEx(self.handle, code, message, pointer)
 
 def _may_change_text(vk: int) -> bool:
-    if vk in {0x08, 0x0d, 0x20, 0x2e, 0xe5}:  # Includes send/newline via Enter.
+    if vk in {0x08, 0x0d, 0x20, 0x2e, 0xe5, 0xe7}:  # Enter, IME and Unicode VK_PACKET.
         return True
     if vk in {0x09, 0x1b} or 0x21 <= vk <= 0x28 or 0x70 <= vk <= 0x87:
         return False  # Tab, Escape, navigation and function keys

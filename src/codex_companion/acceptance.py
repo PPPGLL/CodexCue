@@ -128,6 +128,41 @@ def wait_for(app: QApplication, predicate, label: str, timeout=5.0) -> None:
     raise AssertionError(f"Timed out: {label}")
 
 
+def send_unicode(text: str, target: int) -> None:
+    """Exercise the installed Windows hook, including VK_PACKET input."""
+    class KeyboardInput(ctypes.Structure):
+        _fields_ = [("vk", wi.wintypes.WORD), ("scan", wi.wintypes.WORD),
+                    ("flags", wi.wintypes.DWORD), ("time", wi.wintypes.DWORD),
+                    ("extra", ctypes.c_size_t)]
+
+    class MouseInput(ctypes.Structure):
+        _fields_ = [("x", wi.wintypes.LONG), ("y", wi.wintypes.LONG),
+                    ("data", wi.wintypes.DWORD), ("flags", wi.wintypes.DWORD),
+                    ("time", wi.wintypes.DWORD), ("extra", ctypes.c_size_t)]
+
+    class InputData(ctypes.Union):
+        _fields_ = [("keyboard", KeyboardInput), ("mouse", MouseInput)]
+
+    class Input(ctypes.Structure):
+        _fields_ = [("kind", wi.wintypes.DWORD), ("data", InputData)]
+
+    raw = text.encode("utf-16-le")
+    units = [int.from_bytes(raw[i:i + 2], "little") for i in range(0, len(raw), 2)]
+    events = (Input * (2 * len(units)))()
+    for index, unit in enumerate(units):
+        for up in (0, 1):
+            event = events[2 * index + up]
+            event.kind = 1  # INPUT_KEYBOARD
+            event.data.keyboard.scan = unit
+            event.data.keyboard.flags = 4 | (2 if up else 0)  # UNICODE / KEYUP
+    if wi.user32.GetForegroundWindow() != target or not wi.modifiers_released():
+        raise AssertionError("Synthetic input requires the focused fixture and released modifiers")
+    wi.user32.SendInput.argtypes = (wi.wintypes.UINT, ctypes.POINTER(Input), ctypes.c_int)
+    wi.user32.SendInput.restype = wi.wintypes.UINT
+    if wi.user32.SendInput(len(events), events, ctypes.sizeof(Input)) != len(events):
+        raise AssertionError("Windows did not accept all synthetic input events")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -146,6 +181,7 @@ def main(argv=None) -> int:
               "executable_sha256": hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest(),
               "scope": {"real_uia": True, "real_http": True, "real_clipboard_paste": True,
                         "real_codex_host": False, "physical_keyboard": False, "real_ime": False,
+                        "real_keyboard_hook": True, "native_unicode_input": True,
                         "real_model": bool(args.live_model), "fallback_copy": False},
               "checks": [], "errors": []}
     app = QApplication.instance() or QApplication([])
@@ -188,8 +224,9 @@ def main(argv=None) -> int:
 
     def type_draft(text):
         check("fixture_has_focus", wi.user32.GetForegroundWindow() == target)
-        window.editor.setText(text)
-        companion._hook_key_activity()
+        window.editor.selectAll()
+        send_unicode(text, target)
+        wait_for(app, lambda: window.editor.text() == text, "native Unicode input readback")
         wait_for(app, lambda: companion.state.draft == text and not companion.draft_dirty,
                  "draft observed through real UIA")
 
@@ -302,6 +339,10 @@ def main(argv=None) -> int:
             wait_for(app, lambda: app.clipboard().text() == clipboard_before, "clipboard restoration")
             check("clipboard_restored", True)
             check("tab_does_not_send", window.submissions == 0)
+            request_count = len(server.requests)
+            QTest.qWait(500)
+            check("own_paste_does_not_trigger_completion", len(server.requests) == request_count
+                  and not companion.text_armed and not companion.popup.isVisible())
 
             # Enter invalidates a pending request, then the synthetic host clears
             # its own editor. A late response must not revive the old suggestion.
