@@ -38,3 +38,11 @@ Source desktop/model acceptance also exposed existing limitations outside these 
 - Source desktop acceptance passed 49 checks; installed-model desktop acceptance passed 46 checks. These exercise an isolated synthetic composer with actual Windows UIA, HTTP, popup display and insertion.
 - Additional regression coverage includes compaction during incremental reads, partial large records, a bounded storage buffer, newer corrections, summary-only context, task switching, tokenizer loading and near-full cache stability.
 - Tests use synthetic conversation data. Real Codex-host Tab acceptance and actual user adoption were not measured in this run. Local raw receipts remain under `.local/context-16k/`.
+
+## Exact package and local installation
+
+The clean implementation commit is `3fc8c152ec9812a8c97f6f910df5db03f4b0b192`. Its EXE SHA-256 is `3454f7ca355ef697fe0fab8713781b794cdf13b8186d02ad5f899c9549342000`.
+
+The exact package passed three synthetic desktop runs (52 checks each), one Qwen3 8B desktop/model run (48 checks), and three startup/settings runs (39 checks each, including initial settings). The new desktop fixture checks that a compaction summary reaches the model as background, excludes replacement history and stays out of other tasks. The packaged English partial-word example joined correctly in this fixture, while its greeting still sounded like an assistant; meaning remains distinct from mechanical acceptance.
+
+The native tiktoken library, package checksums, build provenance, license/source inventory and installer lifecycle checks passed. The verified full bundle replaced the local installation; a rollback bundle was retained and the configuration hash did not change. Readback confirmed Qwen3 8B resident at 16,384 tokens and about 7.0 GiB VRAM. This is a local development build; the public version and GitHub release were not changed.
