@@ -4,7 +4,34 @@
 
 ## 版本与候选
 
-功能开发使用 `codex/<topic>` 分支。准备发布时确定唯一版本，同时更新 `pyproject.toml`、`src/codex_companion/__init__.py` 和 `CHANGELOG.md`，运行 `uv lock` 后提交。使用新的版本号制作后续候选，已验证的旧版标签和文件保持不变。
+功能开发使用 `codex/<topic>` 分支，日常改动只更新 `Unreleased`，不用反复修改版本号。发布由三个 Actions 流程协作：日常检查、准备版本、生成草稿 Release。
+
+### 准备下一个版本
+
+1. 将准备发布的功能和修复合入 `main`，确认 `Unreleased` 的说明完整。
+2. 在 GitHub 打开 **Actions → Prepare release → Run workflow**，分支选择 `main`，通常保留 `kind=auto`。
+3. Action 自动新建草稿 PR，同时更新 `pyproject.toml`、`__version__`、`uv.lock`、更新说明和 `.github/release-plan.json`。它会显式请求 Windows 检查。
+4. 审查版本与更新说明，待检查通过后将 PR 标为可审查并合入 `main`。
+5. **Draft release** 自动测试和打包这次发布提交，核对文件哈希与来源，创建不可移动的版本标签和草稿 Release。Beta 版本另有预发布标记；稳定版也先保持草稿。
+
+| `kind` | 行为 |
+| --- | --- |
+| `auto` | Beta 继续递增，例如 `0.1.0b2 → 0.1.0b3`；稳定版根据上次改版后的主分支提交标题判断 major / minor / patch |
+| `beta` | 继续当前 Beta；稳定版则开始下一小版本的 Beta，例如 `0.1.0 → 0.2.0b1` |
+| `stable` | 将当前 Beta 转为稳定版，例如 `0.1.0b3 → 0.1.0` |
+| `patch` / `minor` / `major` | 稳定版明确升补丁、小版本或主版本；Beta 阶段请用 `beta` 或 `stable` |
+
+自动识别以英文 Conventional Commit 标题为准：带 `!` 的不兼容变化提升主版本，`feat:` 提升小版本，其余提升补丁。PR 是最终审核点；描述不规范时显式选择 `kind`，不要让自动猜测替代审核。`uv.lock` 只更新本项目的版本，依赖保持锁定。
+
+### 一次性启用与失败恢复
+
+这些工作流必须先合入 `main`，手动入口才会出现在 Actions 中。仓库的 **Settings → Actions → General → Workflow permissions** 需要允许 **Allow GitHub Actions to create and approve pull requests**。各工作流仍使用各自声明的最小权限，不需要个人访问令牌。组织策略若禁止该选项，需要管理员处理。
+
+重复运行 Prepare release 会复用同版本的未关闭 PR 并重新请求检查。它不会覆盖已有分支；如果推送成功而创建 PR 失败，修好权限后为该分支手动创建 PR，或检查并清理这个未合并分支后重试。发布 PR 的合并不要使用会抑制后续 Actions 的仓库 `GITHUB_TOKEN`；从 GitHub 界面正常合并即可。
+
+Draft release 失败且尚未创建 Release 时，可以在 `main` 上手动重试。重试仍使用最近一次修改发布计划的确切提交，不会把后续开发代码塞进旧版本。已有标签只能指向原提交；已有 Release 和资源不会被覆盖。如果上传中断留下不完整草稿，应先检查草稿，再决定清理并重试或准备新版本。已公开的版本只通过后续版本修复。
+
+本地可用 `python scripts/version.py prepare --kind auto --dry-run` 预览；它要求干净工作区，不修改文件，也不提交或推送。日常检查用 `python scripts/version.py check`。
 
 发布物必须来自干净提交。构建中的 `_internal/build-info.json` 记录版本、提交和工作区状态；打包器会拒绝脏工作区或不匹配的构建。
 
@@ -38,7 +65,7 @@
 
 Windows CI 在干净环境中运行：环境引导、单元测试、下载恢复、安装维护、构建、依赖加载、许可证及对应源码收集、实际包的安装维护测试。
 
-推送候选分支，待相同提交的 CI 成功后审查草稿 PR。在 Windows workflow 中手动选择 `draft_release=true`，可以创建草稿预发布。流程保持仓库可见性，创建的 Release 始终为草稿。
+普通 PR、主分支推送和手动运行使用 `Windows tests and build`，测试包保留 14 天。正式准备候选使用上面的 Prepare release / Draft release 流程；不再使用旧的 `draft_release=true` 开关。发布流程下载同一次运行、确切发布提交的产物，验证后才上传到草稿。
 
 CI 构建的二进制可能与本机包不同。下载 CI 生成的确切 ZIP，解压后重新执行桌面验收，再运行 `check_release.py`；旧 EXE 的通过记录不能用于新 EXE。发布前补充与最终二进制匹配的公开验收摘要。
 

@@ -1,0 +1,86 @@
+name: Draft release
+on:
+  push:
+    branches: [main]
+    paths: [.github/release-plan.json]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: draft-release
+  cancel-in-progress: false
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.plan.outputs.commit }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+    steps:
+      - name: Require the main branch
+        env:
+          SOURCE_REF: ${{ github.ref }}
+        run: test "$SOURCE_REF" = refs/heads/main
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve the release commit, including on a retry
+        id: plan
+        run: python scripts/version.py resolve
+  build:
+    needs: resolve
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      ref: ${{ needs.resolve.outputs.commit }}
+  draft:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
+      PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: release-artifacts
+      - name: Create an immutable tag and draft Release
+        run: |
+          python scripts/version.py resolve --notes "$RUNNER_TEMP/release-notes.md"
+          python scripts/check_ci_assets.py --assets release-artifacts --commit "$RELEASE_COMMIT" --version "$RELEASE_VERSION"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'A Release already exists for this version. Inspect it; existing assets will not be replaced.' >&2
+            exit 1
+          fi
+          if git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag -a "$RELEASE_TAG" "$RELEASE_COMMIT" -m "CodexCue $RELEASE_VERSION"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          assets=(release-artifacts/*.zip release-artifacts/*.txt release-artifacts/sources/*.tar.gz)
+          gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --draft "${flags[@]}" --title "CodexCue $RELEASE_VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          printf 'Draft Release created for %s at %s. Validate its exact Windows package before publishing.\n' "$RELEASE_TAG" "$RELEASE_COMMIT" >> "$GITHUB_STEP_SUMMARY"

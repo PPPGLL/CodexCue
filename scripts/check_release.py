@@ -13,7 +13,7 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def check(assets: Path, receipt: Path) -> dict:
+def check_assets(assets: Path) -> dict:
     sums = {}
     for line in (assets / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
         match = re.fullmatch(r"([a-f0-9]{64})  ([A-Za-z0-9_.-]+)", line)
@@ -60,6 +60,23 @@ def check(assets: Path, receipt: Path) -> dict:
                 raise ValueError("Corresponding Qt/PySide source missing or altered")
         if len(manifest["qt_sources"]) != 2:
             raise ValueError("Expected both Qt Base and PySide corresponding sources")
+    return {"status": "PASS", "version": manifest["version"], "commit": manifest["commit"],
+            "executable_sha256": manifest["executable_sha256"], "assets": len(sums)}
+
+
+def check_ci(assets: Path, commit: str, version: str) -> dict:
+    result = check_assets(assets)
+    if result["commit"] != commit or result["version"] != version:
+        raise ValueError("CI artifacts do not belong to the requested release commit/version")
+    uploaded = {p.name for pattern in ("*.zip", "*.txt", "sources/*.tar.gz") for p in assets.glob(pattern)}
+    declared = {line.split("  ", 1)[1] for line in (assets / "SHA256SUMS.txt").read_text().splitlines()}
+    if uploaded != declared | {"SHA256SUMS.txt"}:
+        raise ValueError("CI upload list differs from the checksum manifest")
+    return {**result, "scope": "ci_artifacts_only"}
+
+
+def check(assets: Path, receipt: Path) -> dict:
+    manifest = check_assets(assets)
     verification = json.loads(receipt.read_text(encoding="utf-8-sig"))
     if (verification["status"] != "PASS" or verification.get("source_commit") != manifest["commit"]
             or verification["executable_sha256"] != manifest["executable_sha256"]):
@@ -69,8 +86,7 @@ def check(assets: Path, receipt: Path) -> dict:
     if (not required <= checks or sum(n.startswith("desktop-") for n in checks) < 3
             or sum(n.startswith("startup-") for n in checks) < 3):
         raise ValueError("Required release acceptance is incomplete")
-    return {"status": "PASS", "version": manifest["version"], "commit": manifest["commit"],
-            "executable_sha256": manifest["executable_sha256"], "assets": len(sums)}
+    return manifest
 
 
 if __name__ == "__main__":

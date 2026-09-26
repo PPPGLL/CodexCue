@@ -1,6 +1,9 @@
-# 更新记录
+# Changelog
 
-## 未发布
+## Unreleased
+
+- Add release PR automation, consistent version checks, and immutable draft releases with matching source and Windows packages.
+- Fix completion not starting for external keyboard and Unicode input; accepting a suggestion no longer counts as new typing.
 
 - 修复多行补全偶尔覆盖草稿的问题：更新内容前停止旧位置动画，并在布局尺寸更新完成后定位。
 - 模型加载后保持常驻；空闲和暂停补全不再自动卸载，移除空闲释放设置。
