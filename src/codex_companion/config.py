@@ -9,13 +9,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from .completion_models import CODE_MODEL_CHOICES
+
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "qwen3:4b-instruct"
 OLLAMA_MODEL_CHOICES = (
     ("qwen3:1.7b", "model_light"),
     (DEFAULT_OLLAMA_MODEL, "model_default"),
     ("qwen3:8b", "model_large"),
-)
+) + CODE_MODEL_CHOICES
 
 
 def default_config_path() -> Path:

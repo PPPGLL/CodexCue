@@ -41,3 +41,5 @@ For a prompt change, inspect new cursor-join, assistant-answer or unsupported-fa
 See [public tools and model candidates](COMPLETION_RESEARCH.md) for the source material behind this approach. Code-completion leaderboards do not establish Chinese message-completion quality.
 
 The [short-completion comparison](BENCHMARK_RESULTS.md) records measured improvements and remaining failures from the first run of the current suite.
+
+For comparisons across model families, see [trying code models on ordinary text](CODE_MODELS.md). The runner also records raw native-prefix responses and repairs. Compare the complete model-and-adapter combination; these runs do not isolate model weights from prompt formatting.

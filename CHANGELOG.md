@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Try Qwen2.5-Coder Base, StarCoder2 and DeepSeek-Coder Base from Settings. These experimental models use native text continuation, with short suggestions and the same cancellation and context handling as the default model. The benchmark records both native and chat requests for comparison.
+
 - Start completion without a fixed typing delay and suggest one short continuation at a time. Press Tab again to keep writing after the previous insertion is confirmed. Preserve the clipboard across consecutive accepts, finish partial words first, and retry punctuation-only output. Add a reproducible local benchmark for prompt quality and latency.
 
 ## 0.1.0b3 — 2026-09-26

@@ -41,7 +41,7 @@ def assess(case: dict, suffix: str, error: str | None = None) -> dict[str, bool]
               "user_voice": not bool(re.search(
                   r"^(?:\s|[。.!！])*?(?:好的[，,]|我会|我来帮|当然可以|Sure[,!]|I will|Yes[,!]|No[,!])",
                   suffix, re.I)),
-              "no_protocol": not bool(re.search(r'"continuation"|<\|im_|<think>|\banchor\b', suffix)),
+              "no_protocol": not bool(re.search(r'"continuation"|<\||<｜|<fim_|<file_sep>|<think>|\banchor\b|(?:Background|User|Assistant):', suffix)),
               "length": case.get("min_chars", 1) <= len(suffix) <= case.get("max_chars", 220)}
     if case.get("no_boundary_start"):
         punctuation = r"[.;:!?。；：！？]" if case.get("allow_comma") else r"[,.;:!?，。；：！？]"
@@ -122,6 +122,7 @@ def run(args, root: Path) -> dict:
     backend = model.OllamaBackend(args.url, args.model)
     rows = []
     original_complete = model.complete_request
+    original_native = getattr(model, "complete_native_request", None)
     attempts = []
 
     async def measured_complete(read, request):
@@ -148,6 +149,24 @@ def run(args, root: Path) -> dict:
         return await original_complete(measured_read, request)
 
     model.complete_request = measured_complete
+    async def measured_native(read, request):
+        async def measured_read(prompt, budget):
+            started = time.perf_counter()
+            attempt = {"prompt_sha256": digest(prompt.encode()), "prompt_chars": len(prompt),
+                       "token_budget": budget, "protocol": "native-prefix"}
+            attempts.append(attempt)
+            try:
+                raw = await read(prompt, budget)
+                attempt["raw"] = raw
+                attempt["empty"] = not raw.strip()
+                attempt["punctuation_only"] = bool(raw.strip()) and not any(c.isalnum() for c in raw)
+                return raw
+            finally:
+                attempt["ms"] = round((time.perf_counter() - started) * 1000, 2)
+        return await original_native(measured_read, request)
+
+    if original_native is not None:
+        model.complete_native_request = measured_native
     try:
         # Provenance uses the exact installed weights, not just a mutable tag.
         tags = backend.client.get(args.url.rstrip("/") + "/api/tags").json()["models"]
@@ -183,11 +202,14 @@ def run(args, root: Path) -> dict:
                       f"{'PASS' if all(row['checks'].values()) else 'FAIL'} {elapsed:.0f}ms", flush=True)
     finally:
         model.complete_request = original_complete
+        if original_native is not None:
+            model.complete_native_request = original_native
         backend.close()  # Leave the shared model resident.
     return {"schema_version": 1, "label": args.label, "synthetic_only": True,
             "measured_at": datetime.now(timezone.utc).isoformat(),
             "source_ref": args.ref, "source_files_sha256": source_files,
             "model": {k: installed[k] for k in ("name", "digest", "details")}, "ollama": version,
+            "completion_protocol": "native-prefix" if getattr(backend, "completion_family", None) else "chat-json",
             "dataset_sha256": digest(data_bytes), "repeat": args.repeat, "seed": args.seed,
             "harness_sha256": digest(Path(__file__).read_bytes()),
             "keyboard_quiet_ms": quiet_ms,

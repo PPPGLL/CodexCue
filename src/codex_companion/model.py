@@ -13,6 +13,8 @@ import httpx
 
 from .config import AppConfig
 from .completion_prompt import SYSTEM_PROMPT, EXAMPLES
+from .completion_models import (NATIVE_INSTRUCTION, NATIVE_STOPS, NATIVE_TOKENS,
+                                escape_native_input, native_completion_family, native_segment)
 from .diagnostics import log_event
 from .sessions import Message
 
@@ -124,6 +126,45 @@ def build_messages(request: SuggestionRequest) -> list[dict[str, str]]:
     return messages
 
 
+def build_native_prompt(request: SuggestionRequest, *, repair: bool = False) -> str:
+    def background(messages):
+        return escape_native_input(json.dumps(
+            [{"speaker": m.role, "text": m.text} for m in completion_background(messages)],
+            ensure_ascii=False))
+
+    prompt = NATIVE_INSTRUCTION
+    if repair:
+        prompt += "Write new words at the cursor, not punctuation alone or copied background.\n\n"
+    # Complete user messages teach the base LM which voice it is continuing.
+    # Reuse the chat examples so model comparisons do not change task examples.
+    for context, draft, suffix in EXAMPLES:
+        prompt += f"Background: {background(context)}\nUser: {escape_native_input(draft + suffix)}\n\n"
+    return prompt + f"Background: {background(request.messages)}\nUser: {escape_native_input(request.draft[-1000:])}"
+
+
+def decode_native_suggestion(raw: str) -> str:
+    # Servers should obey stop sequences, but also strip protocol boundaries
+    # before displaying output from custom transports or interrupted streams.
+    for stop in NATIVE_STOPS:
+        raw = raw.split(stop, 1)[0]
+    return normalize_suggestion(native_segment(raw, final=True), "")
+
+
+async def complete_native_request(read, request: SuggestionRequest) -> str:
+    current = request
+    for attempt in range(2):
+        raw = await read(build_native_prompt(current, repair=bool(attempt)), NATIVE_TOKENS)
+        suffix = decode_native_suggestion(raw)
+        copied = bool(suffix) and repeats_input(suffix, request)
+        if suffix and not copied:
+            return suffix
+        if attempt == 0:
+            log_event("completion_retry", reason="invalid_continuation")
+            if copied:
+                current = SuggestionRequest([], request.draft)
+    return ""
+
+
 def can_continue(draft: str) -> bool:
     return bool(draft.strip())
 
@@ -171,7 +212,7 @@ def repeats_input(suffix: str, request: SuggestionRequest) -> bool:
     candidate = compact(suffix)
     if len(candidate) < 10:
         return False
-    for source in (SYSTEM_PROMPT, request.draft, *(m.text for m in request.messages)):
+    for source in (SYSTEM_PROMPT, NATIVE_INSTRUCTION, request.draft, *(m.text for m in request.messages)):
         original = compact(source)
         matches = SequenceMatcher(None, candidate, original, autojunk=False).get_matching_blocks()
         longest = max(m.size for m in matches)
@@ -221,6 +262,7 @@ class OllamaBackend:
                  *, request_timeout: float = 8.0) -> None:
         self.base_url = _local_url(base_url)
         self.model = model
+        self.completion_family = native_completion_family(model)
         self.transport = transport
         self.request_timeout = request_timeout
         self._network_lock = threading.Lock()
@@ -255,9 +297,14 @@ class OllamaBackend:
         payload = {"model": self.model, "keep_alive": -1, "stream": False,
                    "think": False, "options": {"num_predict": 1, "num_ctx": CONTEXT_TOKENS},
                    "messages": build_messages(SuggestionRequest([], "你好")), "format": continuation_schema("你好")}
+        endpoint = "/api/chat"
+        if self.completion_family:
+            endpoint = "/api/generate"
+            payload = self._native_payload(SuggestionRequest([], "你好"), stream=False)
+            payload["options"]["num_predict"] = 1
         async def warm():
             async with httpx.AsyncClient(transport=self.transport, trust_env=False, timeout=90) as client:
-                response = await client.post(f"{self.base_url}/api/chat", json=payload)
+                response = await client.post(f"{self.base_url}{endpoint}", json=payload)
                 response.raise_for_status()
             return ""
         self._operation(warm, threading.Event(), 90)
@@ -310,6 +357,8 @@ class OllamaBackend:
     def suggest(self, request: SuggestionRequest, emit: Emit, cancel: threading.Event) -> str:
         if not can_continue(request.draft):
             return ""
+        if self.completion_family:
+            return self._suggest_native(request, emit, cancel)
         payload = {"model": self.model, "stream": True, "keep_alive": -1,
                    "think": False, "messages": build_messages(request), "format": continuation_schema(request.draft),
                    "options": {"temperature": 0, "num_predict": COMPLETION_TOKENS, "num_ctx": CONTEXT_TOKENS,
@@ -336,6 +385,41 @@ class OllamaBackend:
             return ""
         if final:
             emit(final)
+        return final
+
+    def _native_payload(self, request: SuggestionRequest, *, stream: bool = True) -> dict:
+        return {"model": self.model, "stream": stream, "raw": True, "keep_alive": -1,
+                "prompt": build_native_prompt(request),
+                "options": {"temperature": 0, "num_predict": NATIVE_TOKENS,
+                            "num_ctx": CONTEXT_TOKENS, "repeat_penalty": 1.0,
+                            "stop": list(NATIVE_STOPS)}}
+
+    def _suggest_native(self, request: SuggestionRequest, emit: Emit, cancel: threading.Event) -> str:
+        payload = self._native_payload(request)
+
+        async def stream(prompt, budget):
+            raw = ""
+            payload["prompt"] = prompt
+            payload["options"]["num_predict"] = budget
+            async with httpx.AsyncClient(transport=self.transport, trust_env=False,
+                                         timeout=self.request_timeout) as client:
+                async with client.stream("POST", f"{self.base_url}/api/generate", json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        chunk = json.loads(line)
+                        if chunk.get("error"):
+                            raise RuntimeError(chunk["error"])
+                        raw += chunk.get("response", "")
+                        if chunk.get("done") or native_segment(raw) is not None:
+                            break
+            return raw
+
+        final = self._operation(lambda: complete_native_request(stream, request), cancel, self.request_timeout)
+        if cancel.is_set() or not final:
+            return ""
+        emit(final)
         return final
 
     def close(self) -> None:
