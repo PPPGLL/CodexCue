@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Evaluate completion meaning with offline, case-by-case Codex reviews; keyword and cursor hints no longer decide semantic pass/fail.
+- Focus suggestions on finishing your sentence or predicting the next one, without automatically turning rough thoughts into detailed plans or checklists.
+- Keep a usable continuation when the model copies the exact full draft instead of its short cursor anchor; strip the copied prefix before showing it.
+
 ## 0.1.0b4 — 2026-09-26
 
 - Keep the model dropdown opaque, including when repeatedly opening and closing it. Show the list immediately without Qt's temporary slide-animation window.

@@ -2,13 +2,13 @@
 
 CodexCue helps you write your next message to Codex. Start typing, pause for a moment, and a suggestion appears beside the input box. If it fits, press **Tab** to add it to your draft.
 
-Sometimes you just need to finish a sentence. Other times, you've got a rough idea like “this table feels cramped” and want help spelling out what should change.
+It helps finish the sentence you're typing, or guesses what you might say next. Each suggestion is short; press Tab again when you want to keep going.
 
-![Example: a rough request about a cramped table gets a suggestion, then Tab adds it to the draft.](docs/assets/completion-demo.svg)
+![Example: an unfinished sentence gets a short suggestion, then Tab adds it to the draft.](docs/assets/completion-demo.svg)
 
 ## What it does
 
-- Suggests a few words or a more detailed follow-up, depending on what you're writing.
+- Finishes a word or sentence, or suggests your next sentence in the same voice.
 - Draws on recent messages when it can identify your current Codex task. Otherwise, it uses your draft alone.
 - Updates suggestions as you keep typing. You can edit anything you accept, and you still send the message yourself.
 - Runs the AI model on your own PC through [Ollama](https://ollama.com). No API key is needed for suggestions.
@@ -20,9 +20,9 @@ You don't need a polished request to get started:
 | You start with… | It might help you add… |
 | --- | --- |
 | “I think we should…” | A possible next thought, based on the conversation. |
-| “This table feels cramped.” | A request for clearer spacing, aligned headings, and readable text in a smaller window. |
-| “The login flow is confusing.” | Which steps to simplify and where people need clearer feedback. |
-| “It's hard to tell if the export worked.” | What a successful export should contain and how missing items should be shown. |
+| “This table would look better with” | “ a little more space between rows.” |
+| “It works now.” | “ I'll try it for a few days.” |
+| “Can we make this simpler?” | “ I'd like it to feel less busy.” |
 
 The table and illustration are examples. Suggestions will vary. If a guess misses the mark, just keep typing.
 

@@ -252,13 +252,15 @@ def main(argv=None) -> int:
 
             if args.live_model:
                 report["model"] = args.live_model
+                report["semantic_review"] = "NOT_REVIEWED"
+                report["model_check_scope"] = "Mechanical output and desktop insertion only; review meaning separately."
                 report["model_results"] = []
                 drafts = ["先不要修改文件，请先", "Please inspect the configu", "这个函数的返回值应该",
                           "帮我比较这两个实现的", "Before running the tests, please", "这个问题解决了吗？",
                           "我觉得", "你好"]
-                detailed_drafts = {"这个表格的展示方式不太好", "导出的时候总是不知道有没有成功，改一下",
+                rough_drafts = {"这个表格的展示方式不太好", "导出的时候总是不知道有没有成功，改一下",
                                    "先不要动代码，帮我看看这个登录流程有什么问题"}
-                drafts.extend(detailed_drafts)
+                drafts.extend(rough_drafts)
                 for draft in drafts:
                     began = time.monotonic()
                     type_draft(draft)
@@ -271,40 +273,31 @@ def main(argv=None) -> int:
                     report["model_results"].append(row)
                     if suffix:
                         check("live_model_suffix_visible", bool(suffix) and companion.can_accept_tab())
-                        check("live_model_keeps_user_voice", not any(text in suffix for text in
-                              ("有什么我可以帮", "我可以帮你", "好的，我会", "我来帮你")))
-                        if draft.endswith("？"):
-                            check("complete_question_adds_user_followup", not suffix.startswith(("是的", "因为", "已经", "没有")))
-                        if draft in detailed_drafts:
+                        if draft in rough_drafts:
                             row["suffix_chars"] = len(suffix)
                             check("rough_request_stays_concise", len(suffix) <= 80)
-                            check("details_finish_a_sentence", suffix.endswith(("。", ".", "？", "?", "！", "!")))
-                            check("details_do_not_invent_numbers", not any(c.isdigit() for c in suffix))
-                        if draft.startswith("先不要动代码"):
-                            check("analysis_only_stays_analysis", "修改后" not in suffix and "调整后" not in suffix)
                         key(0x09)
                         wait_for(app, lambda: window.editor.text() == draft + suffix, "live suffix native paste")
                         check("live_model_paste_does_not_send", window.submissions == 0)
                         QTest.qWait(300)  # Let the production clipboard restoration finish.
                     else:
                         check("live_model_suffix_visible", False)
-                # Reuse the actual packaged backend with adversarial synthetic
-                # history, so semantic regression is checked beyond text length.
-                from .quality_checks import check_context_grounding
+                # Mechanical success does not establish semantic understanding.
+                from .quality_checks import check_output_contract
                 quality_results = []
                 quality_errors = []
                 quality_done = threading.Event()
                 def check_quality():
                     try:
-                        quality_results.extend(check_context_grounding(companion.backend))
+                        quality_results.extend(check_output_contract(companion.backend))
                     except Exception as exc:
                         quality_errors.append(type(exc).__name__)
                     finally:
                         quality_done.set()
                 threading.Thread(target=check_quality, daemon=True).start()
                 wait_for(app, quality_done.is_set, "quoted-rule model regressions", timeout=40)
-                report["context_grounding_results"] = quality_results
-                check("quoted_rules_do_not_become_suggestions", not quality_errors and len(quality_results) == 13
+                report["output_contract_results"] = quality_results
+                check("synthetic_output_contract", not quality_errors and len(quality_results) == 13
                       and all(row["status"] == "PASS" for row in quality_results))
 
                 # Test residency beyond the former 60-second timeout, including

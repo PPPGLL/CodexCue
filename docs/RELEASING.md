@@ -57,7 +57,7 @@ Draft release 失败且尚未创建 Release 时，可以在 `main` 上手动重�
    powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test_install.ps1 -Bundle release-artifacts\candidate\staging\CodexCue
    ```
 
-4. 审阅真实模型样例，检查[发布门槛](RELEASE_READINESS.md)。本机详细日志留在 `.local/`；对外仅使用打包器生成的 `desktop-verification.json` 汇总。
+4. 审阅真实模型样例，检查[发布门槛](RELEASE_READINESS.md)。自动 PASS 只证明格式及插入等受测行为，补全是否接对句子、保持用户口吻和理解背景，需要另附语义评审；提示词改动按[基准说明](BENCHMARK.md)保存逐条评分及失败案例。本机详细日志留在 `.local/`；对外仅使用打包器生成的 `desktop-verification.json` 汇总，以及不含真实会话的合成案例评审。
 
 目录 `candidate` 是命令示例。重试时换一个新目录，避免覆盖旧证据。
 

@@ -182,7 +182,7 @@ def normalize_suggestion(raw: str, draft: str, limit: int = MAX_SUGGESTION_CHARS
         return ""  # A lone separator is not useful writing; request a real continuation.
     if len(raw) <= limit:
         return raw
-    # Keep complete requirements instead of cutting a word or sentence in half.
+    # Keep complete sentences instead of cutting a word or sentence in half.
     boundaries = [m for m in re.finditer(r"[。！？；;]|[.!?](?=\s|$)", raw) if m.end() <= limit]
     return raw[:boundaries[-1].end()] if boundaries else ""
 
@@ -197,10 +197,17 @@ def decode_suggestion(raw: str, draft: str) -> str:
         log_event("completion_output", reason="invalid_format", raw_len=len(raw), suggestion_len=0)
         raise ValueError("Completion model must return a JSON object with a string continuation") from exc
     anchor = draft_anchor(draft)
-    if not value["continuation"].startswith(anchor):
+    continuation = value["continuation"]
+    if draft and continuation.startswith(draft):
+        # Some local models copy the exact full draft despite the short-anchor
+        # instruction. Extract only new text; never accept a rewritten prefix.
+        suffix = continuation[len(draft):]
+    elif continuation.startswith(anchor):
+        suffix = continuation[len(anchor):]
+    else:
         log_event("completion_output", reason="changed_anchor", raw_len=len(raw), suggestion_len=0)
         raise ValueError("Completion model changed the existing draft")
-    suffix = normalize_suggestion(value["continuation"][len(anchor):], "")
+    suffix = normalize_suggestion(suffix, "")
     reason = "suffix" if suffix else "model_empty"
     log_event("completion_output", reason=reason, raw_len=len(raw), suggestion_len=len(suffix))
     return suffix
@@ -226,7 +233,7 @@ def repeats_input(suffix: str, request: SuggestionRequest) -> bool:
 
 
 async def complete_request(read, request: SuggestionRequest) -> str:
-    """One adaptive continuation, with at most one repair under the same deadline."""
+    """One cursor continuation, with at most one repair under the same deadline."""
     schema = continuation_schema(request.draft)
     messages = build_messages(request)
     for attempt in range(2):
@@ -245,8 +252,10 @@ async def complete_request(read, request: SuggestionRequest) -> str:
             # background only when the model actually copied it.
             messages = build_messages(SuggestionRequest([] if copied else request.messages, request.draft))
             messages[0]["content"] += ("\nContinue at the cursor with new words, not punctuation alone. "
-                                      "Finish the unfinished phrase first; if already complete, add a related "
-                                      "follow-up from the user. Do not repeat background or writing rules.")
+                                      "Start the JSON continuation with the exact anchor, not the entire draft. "
+                                      "Finish the unfinished phrase first; if already complete, predict the user's "
+                                      "next short sentence. Do not add a plan or checklist unless the user is "
+                                      "already writing one. Do not repeat background or writing rules.")
     return ""
 
 
