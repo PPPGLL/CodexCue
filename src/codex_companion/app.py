@@ -586,6 +586,19 @@ class InkComboBox(QComboBox):
         popup.setAttribute(Qt.WA_NoSystemBackground, False)
         popup.setAutoFillBackground(True)
 
+    def showPopup(self) -> None:
+        # Qt's 150 ms roll effect shows a separate snapshot window and defers
+        # showing the actual list. Rapid close/reopen can leave that snapshot
+        # covering the popup; its surface is not styled by our white background.
+        # Skip the effect for this dropdown, restoring the app preference even
+        # if showing the popup fails. Keep Qt's normal selection/focus handling.
+        animated = QApplication.isEffectEnabled(Qt.UI_AnimateCombo)
+        QApplication.setEffectEnabled(Qt.UI_AnimateCombo, False)
+        try:
+            super().showPopup()
+        finally:
+            QApplication.setEffectEnabled(Qt.UI_AnimateCombo, animated)
+
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         painter = QPainter(self)

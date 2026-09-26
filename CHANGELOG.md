@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Give the model dropdown an opaque background across its popup window, scrolling area and rows so the settings underneath cannot show through.
+- Keep the model dropdown opaque, including when repeatedly opening and closing it. Show the list immediately without Qt's temporary slide-animation window.
 
 - Try Qwen2.5-Coder Base, StarCoder2 and DeepSeek-Coder Base from Settings. These experimental models use native text continuation, with short suggestions and the same cancellation and context handling as the default model. The benchmark records both native and chat requests for comparison.
 
