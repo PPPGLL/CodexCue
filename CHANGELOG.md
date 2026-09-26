@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0b4 — 2026-09-26
+
 - Keep the model dropdown opaque, including when repeatedly opening and closing it. Show the list immediately without Qt's temporary slide-animation window.
 
 - Keep the recommended model list to the tested Qwen3 choices. Code-model adapters remain available for explicit experiments, with results and limitations documented separately; their small checkpoints were less useful on ordinary text.
