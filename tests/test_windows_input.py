@@ -7,6 +7,26 @@ from PySide6.QtCore import QCoreApplication, QMimeData, QTimer
 pytestmark = pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows only")
 
 
+def test_busy_clipboard_frees_buffer_without_waiting_or_modifying_clipboard(monkeypatch):
+    from codex_companion import windows_input as wi
+
+    freed = []
+    original_free = wi.kernel32.GlobalFree
+    def free(handle):
+        freed.append(handle)
+        return original_free(handle)
+    def unexpected(*args):
+        pytest.fail("Clipboard contention must return without waiting or writing")
+    monkeypatch.setattr(wi.user32, "OpenClipboard", lambda _: False)
+    monkeypatch.setattr(wi.kernel32, "GlobalFree", free)
+    monkeypatch.setattr(wi.user32, "EmptyClipboard", unexpected)
+    monkeypatch.setattr(wi.user32, "CloseClipboard", unexpected)
+    monkeypatch.setattr(wi.time, "sleep", unexpected)
+    with pytest.raises(wi.ClipboardBusyError):
+        wi._set_unicode_clipboard("Synthetic suffix")
+    assert len(freed) == 1
+
+
 def test_codexcue_settings_are_not_treated_as_codex_desktop():
     from codex_companion import windows_input as wi
 

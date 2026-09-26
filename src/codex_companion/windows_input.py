@@ -325,6 +325,10 @@ user32.SetClipboardData.argtypes = (wintypes.UINT, ctypes.c_void_p)
 user32.SetClipboardData.restype = ctypes.c_void_p
 
 
+class ClipboardBusyError(RuntimeError):
+    """Another clipboard reader/writer must finish before we can paste."""
+
+
 def _set_unicode_clipboard(text: str) -> bool:
     raw = text.encode("utf-16-le") + b"\x00\x00"
     handle = kernel32.GlobalAlloc(0x0002, len(raw))  # GMEM_MOVEABLE
@@ -336,13 +340,11 @@ def _set_unicode_clipboard(text: str) -> bool:
         return False
     ctypes.memmove(pointer, raw, len(raw))
     kernel32.GlobalUnlock(handle)
-    for _ in range(10):
-        if user32.OpenClipboard(None):
-            break
-        time.sleep(.02)
-    else:
+    if not user32.OpenClipboard(None):
         kernel32.GlobalFree(handle)
-        return False
+        # Do not sleep on the Qt thread. A clipboard reader may be waiting for
+        # this same thread to render data restored by the previous insertion.
+        raise ClipboardBusyError("Clipboard is temporarily in use")
     try:
         if not user32.EmptyClipboard() or not user32.SetClipboardData(13, handle):
             kernel32.GlobalFree(handle)

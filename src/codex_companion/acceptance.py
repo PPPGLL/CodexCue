@@ -348,9 +348,42 @@ def main(argv=None) -> int:
             wait_for(app, lambda: companion.can_accept_tab(), "next suggestion after accepted paste")
             check("next_request_uses_accepted_text", server.requests[-1]["draft"] == "Please inspect" + SUFFIX)
             check("next_popup_matches_suffix", companion.state.suggestion == NEXT_SUFFIX)
-            check("second_tab_consumed", key(0x09) == 1)
-            wait_for(app, lambda: window.editor.text() == "Please inspect" + SUFFIX + NEXT_SUFFIX,
-                     "consecutive Tab paste readback")
+            # Reproduce a clipboard reader that needs the Qt loop to progress.
+            # Hold only the lock; never replace the user's clipboard contents.
+            clipboard_locked = threading.Event()
+            release_clipboard = threading.Event()
+            def clipboard_reader():
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if wi.user32.OpenClipboard(ctypes.c_void_p(target)):
+                        try:
+                            clipboard_locked.set()
+                            release_clipboard.wait(2)
+                        finally:
+                            wi.user32.CloseClipboard()
+                        return
+                    time.sleep(.01)
+            reader = threading.Thread(target=clipboard_reader, daemon=True)
+            reader.start()
+            busy_attempts = []
+            set_clipboard = wi._set_unicode_clipboard
+            def observed_clipboard_write(text):
+                try:
+                    return set_clipboard(text)
+                except wi.ClipboardBusyError:
+                    busy_attempts.append(True)
+                    raise
+            try:
+                wait_for(app, clipboard_locked.is_set, "external clipboard reader")
+                with patch.object(wi, "_set_unicode_clipboard", observed_clipboard_write):
+                    check("second_tab_consumed", key(0x09) == 1)
+                    QTimer.singleShot(60, release_clipboard.set)
+                    wait_for(app, lambda: window.editor.text() == "Please inspect" + SUFFIX + NEXT_SUFFIX,
+                             "consecutive Tab paste readback")
+                check("busy_clipboard_retried", bool(busy_attempts))
+            finally:
+                release_clipboard.set()
+                reader.join(timeout=2)
             QTest.qWait(300)
             check("only_tab_inserts_next_suggestion", window.editor.text() == "Please inspect" + SUFFIX + NEXT_SUFFIX)
             check("consecutive_tabs_preserve_clipboard", app.clipboard().text() == clipboard_before)

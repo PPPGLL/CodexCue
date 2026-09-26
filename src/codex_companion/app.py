@@ -1630,7 +1630,7 @@ class Companion(QObject):
             self.state.observe(draft, self.context_revision, time.monotonic())
             self.popup.hide()
 
-    def accept_suggestion(self) -> None:
+    def accept_suggestion(self, retry: int = 0) -> None:
         if not self.can_accept_tab():
             return
         suggestion = self.state.suggestion
@@ -1640,6 +1640,20 @@ class Companion(QObject):
         try:
             inserted = windows_input.insert_text(
                 suggestion, self.app.clipboard(), expected_hwnd=self.accept_hwnd)
+        except windows_input.ClipboardBusyError:
+            if retry < 10:
+                generation, hwnd = self.state.generation, self.accept_hwnd
+                activity_at = self.last_typing_at
+                def retry_paste() -> None:
+                    if (self.state.generation == generation and self.accept_hwnd == hwnd
+                            and self.state.suggestion == suggestion
+                            and self.state.draft == current and self.last_typing_at == activity_at):
+                        self.accept_suggestion(retry + 1)
+                QTimer.singleShot(20, self, retry_paste)
+                log_event("paste_retry", reason="clipboard_busy")
+            else:
+                log_event("paste_failed", reason="clipboard_busy")
+            return
         finally:
             self.inserting = False
         if inserted:

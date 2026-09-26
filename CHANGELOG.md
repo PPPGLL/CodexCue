@@ -6,6 +6,7 @@
 
 - Keep the recommended model list to the tested Qwen3 choices. Code-model adapters remain available for explicit experiments, with results and limitations documented separately; their small checkpoints were less useful on ordinary text.
 - Keep short follow-up requirements focused on the stated problem rather than suggesting unrelated structural changes.
+- Retry a briefly busy clipboard without blocking the window or dropping a consecutive Tab acceptance. Cancel retries when the draft or focused window changes.
 
 - Start completion without a fixed typing delay and suggest one short continuation at a time. Press Tab again to keep writing after the previous insertion is confirmed. Preserve the clipboard across consecutive accepts, finish partial words first, and retry punctuation-only output. Add a reproducible local benchmark for prompt quality and latency.
 
