@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Use a 16K context window with model-token budgeting, fuller recent conversations, and existing Codex task summaries; newer requests take precedence over older summaries.
+- Keep short factual continuations that reuse a detail from the conversation instead of unnecessarily discarding the context and retrying.
 - Evaluate completion meaning with offline, case-by-case Codex reviews; keyword and cursor hints no longer decide semantic pass/fail.
 - Focus suggestions on finishing your sentence or predicting the next one, without automatically turning rough thoughts into detailed plans or checklists.
 - Keep a usable continuation when the model copies the exact full draft instead of its short cursor anchor; strip the copied prefix before showing it.

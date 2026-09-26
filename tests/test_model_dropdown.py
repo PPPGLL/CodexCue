@@ -17,6 +17,9 @@ def test_rapid_dropdown_reopen_is_immediate_and_keeps_selection(qapp, qtbot):
     qtbot.waitExposed(dialog)
     dialog.activateWindow()
     qtbot.waitActive(dialog)
+    # Let native window activation settle before timing popup reopen events.
+    # Otherwise a queued activation change can close the first popup on Windows.
+    qtbot.wait(100)
     try:
         for delay in (0, 10, 30, 70, 160) * 4:
             qtbot.mouseClick(combo, Qt.LeftButton,

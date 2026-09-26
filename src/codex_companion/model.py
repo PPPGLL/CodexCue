@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Callable, Protocol
 from urllib.parse import urlparse
@@ -17,6 +17,7 @@ from .completion_models import (NATIVE_INSTRUCTION, NATIVE_STOPS, NATIVE_TOKENS,
                                 escape_native_input, native_completion_family, native_segment)
 from .diagnostics import log_event
 from .sessions import Message
+from .token_budget import TokenCounter
 
 Emit = Callable[[str], None]
 
@@ -58,7 +59,12 @@ class SuggestionBackend(Protocol):
 
 MAX_SUGGESTION_CHARS = 360
 COMPLETION_TOKENS = 512
-CONTEXT_TOKENS = 4096
+CONTEXT_TOKENS = 16384
+REPAIR_INSTRUCTION = ("\nContinue at the cursor with new words, not punctuation alone. "
+                      "Start the JSON continuation with the exact anchor, not the entire draft. "
+                      "Finish the unfinished phrase first; if already complete, predict the user's "
+                      "next short sentence. Do not add a plan or checklist unless the user is "
+                      "already writing one. Do not repeat background or writing rules.")
 
 CONTINUATION_SCHEMA = {
     "type": "object",
@@ -102,16 +108,16 @@ def completion_background(messages: list[Message]) -> list[Message]:
                 paragraphs.append(paragraph)
         text = "\n".join(paragraphs).strip()
         if text:
-            result.append(Message(message.role, text))
+            result.append(replace(message, text=text))
     return result
 
 
 def _completion_input(messages: list[Message], draft: str) -> str:
     # History is quoted task data, never live assistant/user turns. Escape Qwen
     # control-token openers even when the server applies its native template.
-    data = {"background": [{"speaker": m.role, "text": m.text}
+    data = {"background": [{"speaker": m.kind if m.kind == "task_summary" else m.role, "text": m.text}
                            for m in completion_background(messages)],
-            "draft": draft[-1000:], "anchor": draft_anchor(draft)}
+            "draft": draft, "anchor": draft_anchor(draft)}
     return json.dumps(data, ensure_ascii=False).replace("<|", "< |")
 
 
@@ -129,7 +135,8 @@ def build_messages(request: SuggestionRequest) -> list[dict[str, str]]:
 def build_native_prompt(request: SuggestionRequest, *, repair: bool = False) -> str:
     def background(messages):
         return escape_native_input(json.dumps(
-            [{"speaker": m.role, "text": m.text} for m in completion_background(messages)],
+            [{"speaker": m.kind if m.kind == "task_summary" else m.role, "text": m.text}
+             for m in completion_background(messages)],
             ensure_ascii=False))
 
     prompt = NATIVE_INSTRUCTION
@@ -139,7 +146,97 @@ def build_native_prompt(request: SuggestionRequest, *, repair: bool = False) -> 
     # Reuse the chat examples so model comparisons do not change task examples.
     for context, draft, suffix in EXAMPLES:
         prompt += f"Background: {background(context)}\nUser: {escape_native_input(draft + suffix)}\n\n"
-    return prompt + f"Background: {background(request.messages)}\nUser: {escape_native_input(request.draft[-1000:])}"
+    return prompt + f"Background: {background(request.messages)}\nUser: {escape_native_input(request.draft)}"
+
+
+def fit_request(request: SuggestionRequest, counter: TokenCounter, *, native: bool = False) -> SuggestionRequest:
+    """Spend the model's token budget on recent dialogue and older task context.
+
+    Keep original message order for prefix-cache reuse. Selection runs on the
+    inference worker, not the desktop input thread; no model call is involved.
+    """
+    output = NATIVE_TOKENS if native else COMPLETION_TOKENS
+    ceiling = CONTEXT_TOKENS - output - max(128, counter.count(REPAIR_INSTRUCTION) + 32)
+
+    def count(candidate):
+        if native:
+            return counter.count(build_native_prompt(candidate)) + 128
+        return counter.chat_tokens(build_messages(candidate))
+
+    messages = completion_background(request.messages)
+    empty = count(SuggestionRequest([], ""))
+
+    def history_ceiling(draft):
+        # Stable 256-token buckets leave typing room without moving the start
+        # of history on every keystroke (which invalidates Ollama's KV cache).
+        # Count the serialized draft and anchor, including JSON escaping.
+        cost = max(0, count(SuggestionRequest([], draft)) - empty)
+        return ceiling - ((cost + 32 + 255) // 256) * 256
+
+    draft = request.draft
+    limit = history_ceiling(draft)
+    if count(SuggestionRequest(messages, "")) <= limit:
+        return SuggestionRequest(messages, draft)
+    # An exceptionally long pasted draft must leave room for its background.
+    draft_budget = CONTEXT_TOKENS // 4 if messages else ceiling // 2
+    draft = counter.clip(request.draft, draft_budget, tail=True)
+    selected: dict[int, Message] = {}
+
+    def candidate():
+        # Select against an empty draft and its reserved bucket. Keeping this
+        # exact prefix stable also reuses cached token counts during edits.
+        return SuggestionRequest([selected[i] for i in sorted(selected)], "")
+
+    limit = history_ceiling(draft)
+    while empty > limit:
+        # JSON escaping can make control-character-heavy pastes much larger
+        # than their plain-text token count. Budget the serialized prompt too.
+        draft = counter.clip(draft, max(1, counter.count(draft) // 2), tail=True)
+        limit = history_ceiling(draft)
+
+    def add(index, limit):
+        message = messages[index]
+        selected[index] = message
+        if count(candidate()) <= limit:
+            return
+        # Trim only a message that does not fit, on Unicode character boundaries.
+        # Older summaries retain their opening task/constraints; recent dialogue
+        # retains its newest text, including corrections at the end of a turn.
+        left, right = 0, len(message.text)
+        while left < right:
+            middle = (left + right + 1) // 2
+            text = message.text[:middle] if message.kind == "task_summary" else message.text[-middle:]
+            selected[index] = replace(message, text=text)
+            if count(candidate()) <= limit:
+                left = middle
+            else:
+                right = middle - 1
+        if left:
+            text = message.text[:left] if message.kind == "task_summary" else message.text[-left:]
+            selected[index] = replace(message, text=text)
+        else:
+            del selected[index]
+
+    summary = next((i for i in reversed(range(len(messages))) if messages[i].kind == "task_summary"), None)
+    dialogue = [i for i, m in enumerate(messages) if m.kind == "dialogue"]
+    latest_user = next((i for i in reversed(dialogue) if messages[i].role == "user"), None)
+    # Reserve some room for the older task state only when it exists; unused
+    # summary space is returned to the rest of the conversation below.
+    base = count(candidate())
+    summary_room = min(counter.count(messages[summary].text) + 24, (limit - base) // 3) if summary is not None else 0
+    recent_limit = limit - summary_room
+    if latest_user is not None:
+        add(latest_user, recent_limit)
+    if dialogue and dialogue[-1] != latest_user:
+        add(dialogue[-1], recent_limit)
+    if summary is not None:
+        add(summary, limit)
+    for index in reversed(dialogue):
+        if index not in selected:
+            add(index, limit)
+            if count(candidate()) >= limit - 32:
+                break
+    return replace(candidate(), draft=draft)
 
 
 def decode_native_suggestion(raw: str) -> str:
@@ -219,8 +316,16 @@ def repeats_input(suffix: str, request: SuggestionRequest) -> bool:
     candidate = compact(suffix)
     if len(candidate) < 10:
         return False
-    for source in (SYSTEM_PROMPT, NATIVE_INSTRUCTION, request.draft, *(m.text for m in request.messages)):
+    for index, source in enumerate((SYSTEM_PROMPT, NATIVE_INSTRUCTION, request.draft,
+                                    *(m.text for m in request.messages))):
         original = compact(source)
+        if index >= 3 and candidate != original:
+            # A short factual fragment may need to repeat known context to
+            # complete the draft (e.g. a changed color plus its constraint).
+            # Reject wholesale echoes/long copied passages, not that reuse.
+            threshold = 24 if re.search(r"[\u3400-\u9fff]", candidate) else 64
+            if len(candidate) < threshold:
+                continue
         matches = SequenceMatcher(None, candidate, original, autojunk=False).get_matching_blocks()
         longest = max(m.size for m in matches)
         copied = sum(m.size for m in matches)
@@ -251,11 +356,7 @@ async def complete_request(read, request: SuggestionRequest) -> str:
             # Keep facts for format/empty-output repairs. Remove contaminated
             # background only when the model actually copied it.
             messages = build_messages(SuggestionRequest([] if copied else request.messages, request.draft))
-            messages[0]["content"] += ("\nContinue at the cursor with new words, not punctuation alone. "
-                                      "Start the JSON continuation with the exact anchor, not the entire draft. "
-                                      "Finish the unfinished phrase first; if already complete, predict the user's "
-                                      "next short sentence. Do not add a plan or checklist unless the user is "
-                                      "already writing one. Do not repeat background or writing rules.")
+            messages[0]["content"] += REPAIR_INSTRUCTION
     return ""
 
 
@@ -278,6 +379,8 @@ class OllamaBackend:
         self._lifecycle_lock = threading.Lock()
         self._active: set[threading.Event] = set()
         self._closed = False
+        self.token_counter = TokenCounter()
+        self._tokenizer_loaded = False
         # Never send localhost conversation data through HTTP(S)_PROXY.
         self.client = httpx.Client(
             transport=transport,
@@ -313,6 +416,15 @@ class OllamaBackend:
             payload["options"]["num_predict"] = 1
         async def warm():
             async with httpx.AsyncClient(transport=self.transport, trust_env=False, timeout=90) as client:
+                if not self._tokenizer_loaded:
+                    try:
+                        details = await client.post(f"{self.base_url}/api/show",
+                                                    json={"model": self.model, "verbose": True}, timeout=5)
+                        details.raise_for_status()
+                        self.token_counter = TokenCounter.from_model_info(details.json()["model_info"])
+                        self._tokenizer_loaded = True
+                    except Exception as exc:
+                        log_event("tokenizer_fallback", error_type=type(exc).__name__.lower())
                 response = await client.post(f"{self.base_url}{endpoint}", json=payload)
                 response.raise_for_status()
             return ""
@@ -389,7 +501,10 @@ class OllamaBackend:
                         if chunk.get("done"):
                             break
             return raw
-        final = self._operation(lambda: complete_request(stream, request), cancel, self.request_timeout)
+        async def complete():
+            prepared = fit_request(request, self.token_counter)
+            return await complete_request(stream, prepared)
+        final = self._operation(complete, cancel, self.request_timeout)
         if cancel.is_set() or not final:
             return ""
         if final:
@@ -425,7 +540,10 @@ class OllamaBackend:
                             break
             return raw
 
-        final = self._operation(lambda: complete_native_request(stream, request), cancel, self.request_timeout)
+        async def complete():
+            prepared = fit_request(request, self.token_counter, native=True)
+            return await complete_native_request(stream, prepared)
+        final = self._operation(complete, cancel, self.request_timeout)
         if cancel.is_set() or not final:
             return ""
         emit(final)

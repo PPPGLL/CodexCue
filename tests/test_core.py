@@ -43,9 +43,9 @@ def test_long_message_does_not_remove_recent_exchange(tmp_path):
                        Message("user", "关键约束" + "甲" * 900),
                        Message("assistant", "最后答复" + "乙" * 900),
                        Message("user", "新问题" + "丙" * 900)]
-    context = tailer.context(max_messages=6, max_chars=1200)
+    context = tailer.context()
     assert [m.role for m in context] == ["user", "assistant", "user", "assistant", "user"]
-    assert sum(len(m.text) for m in context) <= 1200
+    assert context == tailer.messages
     assert "关键约束" in context[2].text
     assert "最后答复" in context[3].text
 

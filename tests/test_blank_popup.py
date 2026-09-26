@@ -496,7 +496,8 @@ def test_switch_cannot_send_previous_task_context(monkeypatch, tmp_path):
 
     companion = controller()
     old_tailer = companion.tailer
-    companion.context_messages = [Message("assistant", "旧任务答复")]
+    companion.context_messages = [Message("assistant", "旧任务摘要", "task_summary"),
+                                  Message("assistant", "旧任务答复")]
     companion.state.observe("请继续", 1, 0)
     companion.backend = object()
     sent = []
@@ -512,7 +513,7 @@ def test_switch_cannot_send_previous_task_context(monkeypatch, tmp_path):
     assert not companion.context_ready
     assert companion.context_messages == []
     companion.start_request()
-    companion.on_context_changed(old_tailer, 9, [Message("assistant", "旧任务答复")])
+    companion.on_context_changed(old_tailer, 9, [Message("assistant", "旧任务摘要", "task_summary")])
     companion.start_request()
     assert sent == []
 
@@ -528,6 +529,15 @@ def test_switch_cannot_send_previous_task_context(monkeypatch, tmp_path):
     companion.on_observed(1, ("请继续", companion.bounds), 123, 0.0)
     companion.start_request()
     assert [message.text for message in sent[0].messages] == ["新任务问题", "新任务答复"]
+
+
+def test_verified_task_can_use_summary_immediately_after_compaction():
+    from codex_companion.sessions import Message
+    companion = controller()
+    companion.context_messages = [Message("assistant", "当前任务的目标与约束", "task_summary")]
+    assert companion.completion_context() == companion.context_messages
+    companion.context_verified = False
+    assert companion.completion_context() == []
 
 
 def test_auto_mode_blocks_suggestions_until_visible_task_matches(monkeypatch):

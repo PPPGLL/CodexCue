@@ -111,7 +111,7 @@ def test_release_cancels_warm_and_prevents_late_work_from_reloading():
         assert stopped.is_set() and not warm.is_alive() and not release.is_alive()
         backend.warm()  # A delayed startup probe must not undo manual release.
         assert backend.suggest(SuggestionRequest([], "draft"), lambda _: None, threading.Event()) == ""
-        assert [p["keep_alive"] for p in payloads] == [-1, 0]
+        assert [p["keep_alive"] for p in payloads if "keep_alive" in p] == [-1, 0]
     finally:
         backend.close()
 

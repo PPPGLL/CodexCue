@@ -33,6 +33,8 @@ def managed_controller(handler):
 def test_warm_and_each_completion_keep_model_loaded():
     payloads = []
     def handler(request):
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"model_info": {}})
         payload = json.loads(request.content)
         payloads.append(payload)
         data = json.loads(payload["messages"][-1]["content"])
@@ -176,7 +178,7 @@ def test_switching_back_to_previous_model_waits_for_its_release(qtbot, monkeypat
         assert calls == ["/api/generate"] and not companion.ready
         finish.set()
         qtbot.waitUntil(lambda: companion.ready)
-        assert calls == ["/api/generate", "/api/tags", "/api/chat"]
+        assert calls == ["/api/generate", "/api/tags", "/api/show", "/api/chat"]
         assert companion.backend is not old and companion.backend.model == "fixture:1"
     finally:
         finish.set()

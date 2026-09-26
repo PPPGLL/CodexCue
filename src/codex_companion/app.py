@@ -176,7 +176,7 @@ class SessionPoller:
             changed = tailer.poll()
             if changed or tailer is not previous:
                 self.bridge.context_changed.emit(
-                    tailer, tailer.revision, tailer.context(max_messages=6, max_chars=1200))
+                    tailer, tailer.revision, tailer.context())
                 previous = tailer
             with self.condition:
                 if self.tailer is tailer and not self.stopping:
@@ -1050,8 +1050,8 @@ class Companion(QObject):
         context_status.setEnabled(False)
         tooltip = context_label
         if self.completion_context():
-            users = sum(message.role == "user" for message in self.context_messages)
-            assistants = sum(message.role == "assistant" for message in self.context_messages)
+            users = sum(message.role == "user" for message in self.context_messages if message.kind == "dialogue")
+            assistants = sum(message.role == "assistant" for message in self.context_messages if message.kind == "dialogue")
             counts = tr("message_counts", users=users, assistants=assistants)
             count_status = self.menu.addAction(counts)
             count_status.setEnabled(False)
@@ -1486,7 +1486,7 @@ class Companion(QObject):
 
     def completion_context(self) -> list:
         if self.context_verified and self.context_ready and self.tailer:
-            if any(message.role == "user" for message in self.context_messages):
+            if any(message.role == "user" or message.kind == "task_summary" for message in self.context_messages):
                 return self.context_messages
         return []
 

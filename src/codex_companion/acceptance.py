@@ -44,6 +44,9 @@ def write_fixture(home: Path, identity: str, title: str) -> None:
     sessions.mkdir(parents=True, exist_ok=True)
     records = [
         {"type": "session_meta", "payload": {"id": identity, "timestamp": "2026-09-25T00:00:00Z"}},
+        {"type": "compacted", "payload": {"message": f"Synthetic task summary for {identity}.",
+            "replacement_history": [{"type": "message", "role": "developer", "content": [
+                {"type": "input_text", "text": "PRIVATE_SYNTHETIC_REPLACEMENT"}]}]}},
         {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
             {"type": "input_text", "text": f"Synthetic initial request for {identity}; unrelated to its title."}]}},
         {"type": "response_item", "payload": {"type": "message", "role": "assistant",
@@ -249,6 +252,10 @@ def main(argv=None) -> int:
             wait_for(app, lambda: companion.context_verified, "cold start focused composer recognition")
             check("cold_start_blank_no_request", not server.requests and not companion.popup.isVisible())
             check("cold_start_session_alpha", companion.tailer.path.name == "rollout-alpha.jsonl")
+            wait_for(app, lambda: companion.context_ready, "task context loaded")
+            context = companion.completion_context()
+            check("cold_start_task_summary", any(m.kind == "task_summary" and "alpha" in m.text for m in context))
+            check("replacement_history_excluded", all("PRIVATE_SYNTHETIC_REPLACEMENT" not in m.text for m in context))
 
             if args.live_model:
                 report["model"] = args.live_model
@@ -338,6 +345,8 @@ def main(argv=None) -> int:
             wait_for(app, lambda: companion.context_verified, "nine-character title resolution")
             check("short_title_session_alpha", companion.tailer.path.name == "rollout-alpha.jsonl")
             wait_for(app, lambda: companion.can_accept_tab(), "visible suggestion")
+            check("task_summary_sent_as_background", any(m["speaker"] == "task_summary"
+                  and "alpha" in m["text"] for m in server.requests[-1]["background"]))
             check("popup_matches_suffix", companion.popup.label.text() == SUFFIX)
             check("popup_native_visible", bool(wi.user32.IsWindowVisible(int(companion.popup.winId()))))
             clipboard_before = app.clipboard().text()
