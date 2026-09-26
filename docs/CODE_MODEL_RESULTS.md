@@ -1,5 +1,7 @@
 # First code-model trial
 
+This is the historical trial record. The public Beta keeps only the three Qwen3 choices in its recommended list; the code adapters can still be tried by entering a tag manually. See [the current experiment instructions](CODE_MODELS.md) and [the later prompt regression check](BENCHMARK_RESULTS.md#public-beta-follow-up).
+
 Measured locally on 2026-09-26 with an RTX 4090 (24 GB), Ollama 0.34.4 and the 40-case `completion-short-v2` suite. Each model ran once. One case has an empty draft, so latency and nonempty-output statistics cover 39 requests. The code models use native prefix continuation; the existing models use the chat adapter. This compares each model **with its adapter**, not weights in isolation.
 
 | Model | Rule passes | Nonempty outputs | Median ms | p95 ms | Worst ms |

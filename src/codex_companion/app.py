@@ -748,10 +748,11 @@ class SettingsDialog(QDialog):
         selected = self.ollama_model.currentText()
         known = {name for name, _ in models}
         for name, size in models:
-            if self.ollama_model.findText(name) < 0:
-                self.ollama_model.addItem(name)
             index = self.ollama_model.findText(name)
-            self.ollama_model.setItemData(index, tr("installed_size", size=size / 1024 ** 3), Qt.ToolTipRole)
+            # Installed experiments are not recommendations. Keep the curated
+            # list; an explicitly typed custom model can still be checked/saved.
+            if index >= 0:
+                self.ollama_model.setItemData(index, tr("installed_size", size=size / 1024 ** 3), Qt.ToolTipRole)
         self.ollama_model.setCurrentText(selected)
         wanted = selected if ":" in selected else f"{selected}:latest"
         self.status.setText(tr("ollama_installed" if wanted in known else "ollama_missing",

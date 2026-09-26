@@ -40,3 +40,11 @@ Follow [BENCHMARK.md](BENCHMARK.md). The runner captures prompt hashes, source-f
 - Model digest: `0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0`.
 
 Desktop acceptance separately checks real UI Automation, keyboard hooks, insertion, consecutive Tab presses, clipboard preservation, settings and startup in a synthetic host. It does not establish actual Codex-host or physical IME compatibility.
+
+## Public Beta follow-up
+
+The release prompt now asks the model to keep a check focused on the reported problem rather than expand it into data deletion or structural changes. The unchanged 13-case quoted-context check passed 13/13 with the default model; it had previously passed 12/13. The report-completeness example now asks to identify missing parts and explain the original data structure, rather than requesting a structural change. This is a useful improvement, not a guarantee that every continuation is appropriate.
+
+The existing 40-case suite was then repeated three times on the same local model: rule pass rate 95%, nonempty suggestions 97.4%, warm backend median 165.2 ms and p95 202.9 ms. These are regression measurements, not a fresh held-out evaluation or a claim of faster inference. The author inspected the 39 nonempty draft cases. The two rule failures remain the ambiguous comma boundary and the empty English continuation under quoted instructions described above. Other limitations, including repetitive follow-ups and unsupported guesses, remain visible in the outputs.
+
+Settings recommends only Qwen3 1.7B, 4B Instruct and 8B for this Beta. Code-model adapters remain available for explicitly requested experiments. No model weights are bundled. The existing six-model comparison does not separate parameter count from training, quantization or prompt format, and larger code models remain untested.

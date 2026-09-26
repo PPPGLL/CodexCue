@@ -16,7 +16,7 @@ def wait_for(app, condition, timeout=2):
     assert condition()
 
 
-def test_settings_offer_presets_installed_models_and_custom_name(monkeypatch):
+def test_settings_offer_curated_presets_and_keep_custom_names(monkeypatch):
     from codex_companion import i18n
 
     monkeypatch.setattr(i18n, "system_ui_languages", lambda: ["zh-CN"])
@@ -29,7 +29,10 @@ def test_settings_offer_presets_installed_models_and_custom_name(monkeypatch):
         assert dialog.ollama_model.isEditable()
         assert all(dialog.ollama_model.findText(name) >= 0 for name, _ in OLLAMA_MODEL_CHOICES)
         dialog.check_ollama()
-        wait_for(app, lambda: dialog.ollama_model.findText("other:latest") >= 0)
+        wait_for(app, lambda: "所选模型已安装" in dialog.status.text())
+        assert dialog.ollama_model.count() == 3
+        assert dialog.ollama_model.findText("other:latest") == -1
+        assert all(name.startswith("qwen3:") for name, _ in OLLAMA_MODEL_CHOICES)
         assert dialog.ollama_model.currentText() == "qwen3:4b-instruct"
         assert "所选模型已安装" in dialog.status.text()
         dialog.ollama_model.setCurrentText("custom-model:latest")

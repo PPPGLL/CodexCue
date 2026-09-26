@@ -15,6 +15,8 @@ def test_rapid_dropdown_reopen_is_immediate_and_keeps_selection(qapp, qtbot):
     original = combo.currentText()
     dialog.show()
     qtbot.waitExposed(dialog)
+    dialog.activateWindow()
+    qtbot.waitActive(dialog)
     try:
         for delay in (0, 10, 30, 70, 160) * 4:
             qtbot.mouseClick(combo, Qt.LeftButton,

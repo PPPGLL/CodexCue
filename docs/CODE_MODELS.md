@@ -1,12 +1,14 @@
 # Trying code models on ordinary text
 
-CodexCue can use Qwen2.5-Coder Base, StarCoder2 and DeepSeek-Coder Base to continue your messages. They are experimental choices: coding benchmark scores do not tell us whether they write better Chinese or English drafts. The default remains `qwen3:4b-instruct`.
+CodexCue retains experimental adapters for Qwen2.5-Coder Base, StarCoder2 and DeepSeek-Coder Base. These models are not in the Beta's recommended list: the small versions produced less useful ordinary-text continuations in our local trial. The default remains `qwen3:4b-instruct`, with Qwen3 1.7B and 8B as the other listed choices.
 
 The [first local comparison](CODE_MODEL_RESULTS.md) includes the three small code models and the existing Qwen3 choices, with measured timings, examples and known failures.
 
 ## Switch models
 
-Open **Settings** from the tray, choose a model, and click **Download model** if it is not installed. Save after the download finishes. The selected model loads automatically; the first suggestion can take longer while it loads. You can switch back to `qwen3:4b-instruct` in the same list. Downloading does not change the selected model until you save.
+For an explicit experiment, open **Settings** from the tray and type the exact model tag into the editable model field. Click **Download model** only if you want to install its weights, then save after the download finishes. Refreshing the list does not add experimental models to the recommendations. You can switch back to `qwen3:4b-instruct` from the list. Downloading does not select a model until you save.
+
+The trial does not isolate the effect of model size. Training data, Base versus Instruct training, prompt format, quantization and model age also differ. Testing larger checkpoints may help answer that question, but no larger code model has been validated for this Beta. Model weights are not included in the application package.
 
 | Model | Approximate download | Intended trial |
 |---|---:|---|

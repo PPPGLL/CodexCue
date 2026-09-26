@@ -4,7 +4,8 @@
 
 - Keep the model dropdown opaque, including when repeatedly opening and closing it. Show the list immediately without Qt's temporary slide-animation window.
 
-- Try Qwen2.5-Coder Base, StarCoder2 and DeepSeek-Coder Base from Settings. These experimental models use native text continuation, with short suggestions and the same cancellation and context handling as the default model. The benchmark records both native and chat requests for comparison.
+- Keep the recommended model list to the tested Qwen3 choices. Code-model adapters remain available for explicit experiments, with results and limitations documented separately; their small checkpoints were less useful on ordinary text.
+- Keep short follow-up requirements focused on the stated problem rather than suggesting unrelated structural changes.
 
 - Start completion without a fixed typing delay and suggest one short continuation at a time. Press Tab again to keep writing after the previous insertion is confirmed. Preserve the clipboard across consecutive accepts, finish partial words first, and retry punctuation-only output. Add a reproducible local benchmark for prompt quality and latency.
 
