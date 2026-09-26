@@ -19,7 +19,7 @@ _SAFE_FIELDS = {
     "backend", "bounds", "draft_len", "enabled", "error_type", "foreground",
     "generation", "hwnd", "kind", "latency_ms", "reason", "revision", "session_id",
     "shown", "suggestion_len", "visible_count", "visible_chars",
-    "uia_ms", "index_ms", "context_count", "context_chars", "context_roles", "visible",
+    "uia_ms", "index_ms", "context_count", "context_chars", "context_roles", "visible", "raw_len",
 }
 _SAFE_WORD = re.compile(r"^[a-z0-9_]+$")
 

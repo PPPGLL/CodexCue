@@ -20,32 +20,39 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFormLayout,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from .branding import app_icon, render_mark, tray_icon
-from .config import (AppConfig, KEYRING_SERVICE, OLLAMA_MODEL_CHOICES,
+from .config import (AppConfig, OLLAMA_MODEL_CHOICES,
                      default_sessions_root,
-                     existing_config_path, get_cloud_key)
+                     existing_config_path)
 from .diagnostics import log_event, log_path, setup_logging
 from .i18n import tr
 from .model import OllamaBackend, SuggestionRequest, make_backend
 from .sessions import SessionIndex, SessionTailer, match_visible_session
-from .state import RequestToken, SuggestionState
+from .state import EditorSnapshot, RequestToken, SuggestionState
 from . import windows_input
 
 
 class Bridge(QObject):
     observed = Signal(int, object, object, float)
     context_changed = Signal(object, int, object)
-    finished = Signal(object, str)
+    finished = Signal(object, object)
     failed = Signal(object, str)
     warmed = Signal(object, bool, str)
+    model_released = Signal(object, bool)
     session_resolved = Signal(int, int, object)
+    key_activity = Signal()
+    mouse_activity = Signal(object, object)
+    navigation = Signal()
+    accept_requested = Signal()
 
 
 class DraftMonitor:
     """Read UI Automation on a COM thread so a slow read cannot stall typing."""
 
-    def __init__(self, bridge: Bridge, last_typing_at=lambda: 0.0) -> None:
+    def __init__(self, bridge: Bridge, last_typing_at=lambda: 0.0,
+                 last_activity_kind=lambda: "keyboard") -> None:
         self.bridge = bridge
         self.last_typing_at = last_typing_at
+        self.last_activity_kind = last_activity_kind
         self.generation = 0
         self.active = False
         self.stopping = threading.Event()
@@ -73,20 +80,35 @@ class DraftMonitor:
         previous: object = object()
         previous_generation = -1
         previous_typing_at = -1.0
+        settling_for = None
+        baseline = None
+        settle_retries = 0
         try:
             while not self.stopping.is_set():
+                # Consume the wake before reading. Activity that arrives during
+                # UIA stays set for the next iteration.
+                self.changed.clear()
                 generation = self.generation
                 if self.active:
                     typing_at = self.last_typing_at()
-                    quiet_remaining = 0.3 - (time.monotonic() - typing_at)
+                    quiet = 0.15 if self.last_activity_kind() == "mouse" else 0.3
+                    quiet_remaining = quiet - (time.monotonic() - typing_at)
                     if quiet_remaining > 0:
                         self.changed.wait(quiet_remaining)
                         self.changed.clear()
                         continue
                     hwnd_before = windows_input.user32.GetForegroundWindow()
+                    if settling_for != (generation, typing_at):
+                        settling_for = (generation, typing_at)
+                        baseline = previous
+                        settle_retries = 0
+                    read_started = time.monotonic()
                     read = windows_input.read_draft()
+                    log_event("draft_read", latency_ms=round((time.monotonic() - read_started) * 1000),
+                              shown=read is not None)
                     latest_typing_at = self.last_typing_at()
-                    if latest_typing_at != typing_at or time.monotonic() - latest_typing_at < 0.3:
+                    if (latest_typing_at != typing_at
+                            or time.monotonic() - latest_typing_at < quiet):
                         continue  # A key arrived during the UIA call; discard that snapshot.
                     hwnd_after = windows_input.user32.GetForegroundWindow()
                     if hwnd_before != hwnd_after:
@@ -100,10 +122,22 @@ class DraftMonitor:
                         previous = observation
                         previous_generation = generation
                         previous_typing_at = typing_at
-                # Keyboard activity wakes the monitor promptly. Stable drafts
-                # need only a slow poll for mouse edits and focus changes.
-                self.changed.wait(0.8)
-                self.changed.clear()
+                    # Electron can report the pre-key value once after a quiet
+                    # period. Retry a known editor briefly, then return to idle.
+                    # Without this, an unchanged snapshot waits for another key
+                    # forever, even after the UIA value finally commits.
+                    if (typing_at > 0 and settle_retries < 2
+                            and isinstance(baseline, tuple) and baseline[0] is not None
+                            and baseline[1] == hwnd_before
+                            and (read is None or read[0] == baseline[0][0])):
+                        settle_retries += 1
+                        self.changed.wait(.08)
+                        continue
+                # Hooks wake the monitor for keyboard, mouse, and focus input.
+                # Repeated UIA reads while idle can stall the Codex renderer.
+                if self.stopping.is_set():
+                    break
+                self.changed.wait()
         finally:
             if initialized:
                 ctypes.windll.ole32.CoUninitialize()
@@ -210,10 +244,10 @@ class TaskResolver:
                     if visible:
                         index_started = time.monotonic()
                         previous_scan = self.index.paths_at
-                        infos = self.index.list()
+                        infos = self.index.candidates(visible)
                         match = match_visible_session(visible, infos)
                         if match is None and self.index.paths_at == previous_scan:
-                            infos = self.index.list(force_refresh=True)
+                            infos = self.index.candidates(visible, force_refresh=True)
                             match = match_visible_session(visible, infos)
                         index_ms += round((time.monotonic() - index_started) * 1000)
                     if match is None:
@@ -234,15 +268,23 @@ class TaskResolver:
                             loaded_now = infos is None
                             previous_scan = self.index.paths_at
                             if infos is None:
-                                infos = self.index.list()
+                                infos = self.index.candidates(visible)
                             match = match_visible_session(visible, infos)
                             if match is None and loaded_now and self.index.paths_at == previous_scan:
-                                infos = self.index.list(force_refresh=True)
+                                infos = self.index.candidates(visible, force_refresh=True)
                                 match = match_visible_session(visible, infos)
                             index_ms += round((time.monotonic() - index_started) * 1000)
                 except Exception as exc:
                     log_event("context_resolution_failed", error_type=type(exc).__name__.lower())
                     match = None
+                if not visible:
+                    editor_focused = windows_input.focused_codex_editor()
+                    log_event("context_probe_skipped", hwnd=hwnd,
+                              reason=("no_visible_text" if editor_focused
+                                      else "editor_not_focused"))
+                    if editor_focused and generation == self.generation:
+                        self.bridge.session_resolved.emit(generation, hwnd, None)
+                    continue
                 log_event("context_probe", hwnd=hwnd, visible_count=len(visible),
                           visible_chars=sum(len(value) for value in visible),
                           shown=match is not None, uia_ms=uia_ms, index_ms=index_ms,
@@ -301,7 +343,8 @@ class InferenceWorker:
                 self.bridge.failed.emit(token, str(exc))
 
 
-def popup_position(bounds: tuple[int, int, int, int], width: int, height: int, screens) -> QPoint | None:
+def popup_position(bounds: tuple[int, int, int, int], width: int, height: int, screens,
+                   *, fallback: bool = False) -> QPoint | None:
     """Place the popup outside the editor, accounting for physical UIA pixels."""
     if not screens or width <= 0 or height <= 0:
         return None
@@ -326,6 +369,10 @@ def popup_position(bounds: tuple[int, int, int, int], width: int, height: int, s
     area = selected.availableGeometry().adjusted(6, 6, -6, -6)
     if area.width() < width or area.height() < height:
         return None
+    if fallback:
+        # The fallback bounds describe the host window, not its composer. Keep
+        # the suggestion on screen near the top right, away from the composer.
+        return QPoint(area.right() - width + 1, area.top())
 
     def clamp(value: int, low: int, high: int) -> int:
         return max(low, min(value, high))
@@ -400,6 +447,7 @@ class SuggestionPopup(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 3, 5, 7)
         card = QFrame()
+        self._card = card
         card.setObjectName("suggestionCard")
         card_layout = QHBoxLayout(card)
         card_layout.setContentsMargins(10, 7, 9, 7)
@@ -442,22 +490,41 @@ class SuggestionPopup(QWidget):
             self._appear.addAnimation(animation)
 
     def show_text(self, text: str, bounds: tuple[int, int, int, int] | None,
-                  *, suggest: bool = False) -> None:
+                  *, suggest: bool = False, fallback: bool = False) -> None:
         if not bounds:
             self.hide()
             return
-        preview = text[:32] + ("…" if len(text) > 32 else "")
+        # A previous entrance still targets its old height/position. Stop it
+        # before resizing so it cannot move a taller card back over the draft.
+        self._appear.stop()
+        self.setWindowOpacity(1.0)
+        preview = text
+        # Detailed requests need a wider card so the full insert stays readable.
+        screen = QApplication.screenAt(QPoint(bounds[0], bounds[3])) or QApplication.primaryScreen()
+        width = 480 if len(preview) > 80 else 338
+        if screen is not None:
+            width = min(width, screen.availableGeometry().width() - 16)
+        self.setFixedWidth(width)
+        text_width = max(1, width - 112)
+        self.label.setFixedWidth(text_width)
+        self.label.setTextFormat(Qt.PlainText)
         self.label.setText(preview)
         self.label.setToolTip(text if preview != text else "")
         # An explicit height keeps the card compact even when Qt's preferred
         # size assumes a wider label and would otherwise clip the text.
         wrapped = self.label.fontMetrics().boundingRect(
-            QRect(0, 0, 226, 1000), Qt.TextWordWrap, preview)
+            QRect(0, 0, text_width, 1000), Qt.TextWordWrap, preview)
         line_height = self.label.fontMetrics().lineSpacing()
-        self.label.setFixedHeight(max(line_height, min(wrapped.height(), line_height * 2 + 2)))
+        self.label.setFixedHeight(max(line_height, wrapped.height()))
         self.hint.setVisible(suggest)
+        # Child size changes can leave the outer size hint cached until the
+        # next event-loop turn. Resolve both layouts before choosing a position.
+        self._card.layout().invalidate()
+        self._card.layout().activate()
+        self.layout().invalidate()
+        self.layout().activate()
         self.adjustSize()
-        point = popup_position(bounds, self.width(), self.height(), QApplication.screens())
+        point = popup_position(bounds, self.width(), self.height(), QApplication.screens(), fallback=fallback)
         if point is None:
             log_event("popup_not_placed", suggestion_len=len(text), bounds=bounds)
             self.hide()
@@ -476,13 +543,13 @@ class SuggestionPopup(QWidget):
                 self.setWindowOpacity(0.82)
             self.show()
             if not was_visible:
-                self._appear.stop()
                 self._fade.setStartValue(0.82)
                 self._fade.setEndValue(1.0)
                 self._rise.setStartValue(start)
                 self._rise.setEndValue(point)
                 self._appear.start()
-            log_event("popup_shown", suggestion_len=len(text), bounds=bounds)
+            log_event("popup_shown", suggestion_len=len(text), bounds=bounds,
+                      visible=bool(windows_input.user32.IsWindowVisible(int(self.winId()))))
 
     def hideEvent(self, event) -> None:
         self._appear.stop()
@@ -521,6 +588,9 @@ class InkComboBox(QComboBox):
 
 
 class SettingsDialog(QDialog):
+    models_checked = Signal(int, object, object)
+    save_checked = Signal(int, object)
+
     def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("settings_title"))
@@ -528,6 +598,11 @@ class SettingsDialog(QDialog):
         self.setWindowIcon(app_icon())
         self.config = config
         self.download_process = None
+        self._model_check_id = 0
+        self._save_check_id = 0
+        self._pending_save = None
+        self.models_checked.connect(self._on_models_checked)
+        self.save_checked.connect(self._on_save_checked)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(23, 21, 23, 20)
         layout.setSpacing(15)
@@ -536,7 +611,8 @@ class SettingsDialog(QDialog):
         mark.setPixmap(render_mark(40))
         header.addWidget(mark)
         heading = QVBoxLayout()
-        title = QLabel("CodexCue")
+        from . import __version__
+        title = QLabel(f"CodexCue {__version__}")
         title.setObjectName("settingsTitle")
         subtitle = QLabel(tr("settings_subtitle"))
         subtitle.setObjectName("settingsSubtitle")
@@ -547,26 +623,14 @@ class SettingsDialog(QDialog):
         layout.addLayout(header)
         form = QFormLayout()
         form.setSpacing(10)
-        self.backend = InkComboBox()
-        self.backend.addItems([tr("backend_local"), tr("backend_cloud")])
-        self.backend.setCurrentIndex(0 if config.backend == "ollama" else 1)
         self.ollama_url = QLineEdit(config.ollama_url)
         self.ollama_model = InkComboBox()
         self.ollama_model.setEditable(True)
         self.ollama_model.addItems([name for name, _ in OLLAMA_MODEL_CHOICES])
         self.ollama_model.setCurrentText(config.ollama_model)
         self.ollama_model.currentTextChanged.connect(self.update_model_note)
-        self.cloud_url = QLineEdit(config.cloud_base_url)
-        self.cloud_model = QLineEdit(config.cloud_model)
-        self.cloud_key = QLineEdit()
-        self.cloud_key.setEchoMode(QLineEdit.Password)
-        self.cloud_key.setPlaceholderText(tr("keep_key"))
-        for label, widget in [(tr("field_backend"), self.backend),
-                              (tr("field_ollama_url"), self.ollama_url),
-                              (tr("field_local_model"), self.ollama_model),
-                              ("API Base URL", self.cloud_url),
-                              (tr("field_cloud_model"), self.cloud_model),
-                              ("API Key", self.cloud_key)]:
+        for label, widget in [(tr("field_ollama_url"), self.ollama_url),
+                              (tr("field_local_model"), self.ollama_model)]:
             form.addRow(label, widget)
         layout.addLayout(form)
         self.model_note = QLabel()
@@ -574,7 +638,8 @@ class SettingsDialog(QDialog):
         self.model_note.setWordWrap(True)
         layout.addWidget(self.model_note)
         self.update_model_note()
-        self.status = QLabel(tr("model_install_notice"))
+        self.status = QLabel(tr("config_recovered" if getattr(config, "recovery_required", False)
+                                else "model_install_notice"))
         self.status.setObjectName("settingsStatus")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -590,6 +655,7 @@ class SettingsDialog(QDialog):
         save = QPushButton(tr("save"))
         save.setObjectName("primaryButton")
         save.clicked.connect(self.save)
+        self.save_button = save
         cancel = QPushButton(tr("cancel"))
         cancel.clicked.connect(self.reject)
         buttons.addStretch()
@@ -630,27 +696,42 @@ class SettingsDialog(QDialog):
         self.model_note.setText(tr(notes.get(selected, "model_custom")))
 
     def check_ollama(self) -> None:
-        try:
-            backend = OllamaBackend(self.ollama_url.text().strip(), self.ollama_model.currentText().strip())
+        self._model_check_id += 1
+        check_id = self._model_check_id
+        url = self.ollama_url.text().strip()
+        model = self.ollama_model.currentText().strip()
+        self.status.setText(tr("checking_models"))
+
+        def check() -> None:
             try:
-                models = backend.list_models()
-            finally:
-                backend.close()
-            selected = self.ollama_model.currentText()
-            known = {name for name, _ in models}
-            for name, size in models:
-                if self.ollama_model.findText(name) < 0:
-                    self.ollama_model.addItem(name)
-                index = self.ollama_model.findText(name)
-                self.ollama_model.setItemData(index, tr("installed_size", size=size / 1024 ** 3), Qt.ToolTipRole)
-            self.ollama_model.setCurrentText(selected)
-            wanted = selected if ":" in selected else f"{selected}:latest"
-            if wanted in known:
-                self.status.setText(tr("ollama_installed", count=len(models)))
-            else:
-                self.status.setText(tr("ollama_missing", count=len(models)))
-        except Exception as exc:
-            self.status.setText(tr("ollama_unavailable", error=exc))
+                backend = OllamaBackend(url, model)
+                try:
+                    result = backend.list_models()
+                finally:
+                    backend.close()
+                self.models_checked.emit(check_id, result, None)
+            except Exception as exc:
+                self.models_checked.emit(check_id, None, str(exc))
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def _on_models_checked(self, check_id: int, models: object, error: object) -> None:
+        if check_id != self._model_check_id:
+            return
+        if error is not None:
+            self.status.setText(tr("ollama_unavailable", error=error))
+            return
+        selected = self.ollama_model.currentText()
+        known = {name for name, _ in models}
+        for name, size in models:
+            if self.ollama_model.findText(name) < 0:
+                self.ollama_model.addItem(name)
+            index = self.ollama_model.findText(name)
+            self.ollama_model.setItemData(index, tr("installed_size", size=size / 1024 ** 3), Qt.ToolTipRole)
+        self.ollama_model.setCurrentText(selected)
+        wanted = selected if ":" in selected else f"{selected}:latest"
+        self.status.setText(tr("ollama_installed" if wanted in known else "ollama_missing",
+                               count=len(models)))
 
     def download_model(self) -> None:
         from PySide6.QtCore import QProcess, QProcessEnvironment
@@ -675,8 +756,8 @@ class SettingsDialog(QDialog):
         process.setArguments(["pull", model])
         process.readyReadStandardError.connect(self._read_download_progress)
         process.readyReadStandardOutput.connect(self._read_download_progress)
-        process.errorOccurred.connect(lambda _: self.status.setText(tr("ollama_run_failed")))
-        process.finished.connect(lambda code, _: self._download_done(code))
+        process.errorOccurred.connect(lambda error: self._download_error(process, error))
+        process.finished.connect(lambda code, _: self._download_done(code, process))
         process.start()
         self.status.setText(tr("downloading_model", model=model))
 
@@ -691,46 +772,83 @@ class SettingsDialog(QDialog):
             self.status.setText(tr("downloading_model_progress", model=self._download_model,
                                    percent=percentages[-1][:-1]))
 
-    def _download_done(self, code: int) -> None:
+    def _download_error(self, process, error) -> None:
+        from PySide6.QtCore import QProcess
+
+        if process is not self.download_process:
+            return
+        self.status.setText(tr("ollama_run_failed"))
+        if error == QProcess.FailedToStart:
+            self.download_process = None
+            process.deleteLater()
+
+    def _download_done(self, code: int, process=None) -> None:
+        if process is not None and process is not self.download_process:
+            return
+        completed = self.download_process
         self.download_process = None
+        if completed is not None:
+            completed.deleteLater()
         if code == 0:
             self.check_ollama()
         else:
             self.status.setText(tr("model_download_failed", code=code))
 
     def save(self) -> None:
-        backend = "ollama" if self.backend.currentIndex() == 0 else "cloud"
         try:
-            if backend == "ollama":
-                probe = OllamaBackend(self.ollama_url.text().strip(), self.ollama_model.currentText().strip())
+            url = self.ollama_url.text().strip()
+            model = self.ollama_model.currentText().strip()
+            if not model:
+                raise ValueError(tr("enter_model"))
+            self._save_check_id += 1
+            check_id = self._save_check_id
+            self._pending_save = (url, model)
+            self.save_button.setEnabled(False)
+            self.status.setText(tr("checking_models"))
+
+            def check() -> None:
                 try:
-                    _, installed = probe.available()
-                finally:
-                    probe.close()
-                if not installed:
-                    raise ValueError(tr("selected_model_missing"))
-            else:
-                from urllib.parse import urlparse
-                url = self.cloud_url.text().strip()
-                parsed = urlparse(url)
-                if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-                    raise ValueError(tr("https_required"))
-                if not parsed.netloc or not self.cloud_model.text().strip():
-                    raise ValueError(tr("api_address_model_required"))
-                import keyring
-                if not self.cloud_key.text() and not get_cloud_key(url):
-                    raise ValueError(tr("api_key_required"))
-                if self.cloud_key.text():
-                    keyring.set_password(KEYRING_SERVICE, url, self.cloud_key.text())
+                    probe = OllamaBackend(url, model)
+                    try:
+                        _, installed = probe.available()
+                    finally:
+                        probe.close()
+                    result = "" if installed else "model_missing"
+                except Exception as exc:
+                    result = str(exc)
+                self.save_checked.emit(check_id, result)
+
+            threading.Thread(target=check, daemon=True).start()
         except Exception as exc:
             self.status.setText(str(exc))
             return
-        self.config.backend = backend
-        self.config.ollama_url = self.ollama_url.text().strip()
-        self.config.ollama_model = self.ollama_model.currentText().strip()
-        self.config.cloud_base_url = self.cloud_url.text().strip()
-        self.config.cloud_model = self.cloud_model.text().strip()
-        self.config.save()
+
+    def _on_save_checked(self, check_id: int, error: str) -> None:
+        if check_id != self._save_check_id:
+            return
+        self.save_button.setEnabled(True)
+        pending = self._pending_save
+        self._pending_save = None
+        if error:
+            self.status.setText(tr("selected_model_missing") if error == "model_missing" else error)
+            return
+        if pending != (self.ollama_url.text().strip(), self.ollama_model.currentText().strip()):
+            return
+        self._commit_config()
+
+    def _commit_config(self) -> None:
+        from dataclasses import replace
+
+        updates = dict(ollama_url=self.ollama_url.text().strip(),
+                       ollama_model=self.ollama_model.currentText().strip())
+        try:
+            replace(self.config, **updates).save()
+        except OSError:
+            self.status.setText(tr("config_save_failed"))
+            return
+        for key, value in updates.items():
+            setattr(self.config, key, value)
+        self.config.recovery_required = False
         self.accept()
 
 
@@ -750,7 +868,12 @@ class Companion(QObject):
         self.bridge.finished.connect(self.on_finished)
         self.bridge.failed.connect(self.on_failed)
         self.bridge.warmed.connect(self.on_warmed)
+        self.bridge.model_released.connect(self.on_model_released)
         self.bridge.session_resolved.connect(self.on_session_resolved)
+        self.bridge.key_activity.connect(self.note_typing)
+        self.bridge.mouse_activity.connect(self.note_mouse_activity)
+        self.bridge.navigation.connect(self.note_navigation)
+        self.bridge.accept_requested.connect(self.accept_suggestion)
         # The keyboard quiet period is enforced before UIA reads; do not add
         # a second debounce after the latest draft has already been captured.
         self.state = SuggestionState(debounce_seconds=0.0)
@@ -764,6 +887,10 @@ class Companion(QObject):
         self.context_verified = False
         self.active_context_label = ""
         self.backend = None
+        self.model_released = False
+        self.releasing_backend = None
+        self._model_release_thread = None
+        self._backend_reconfigure_pending = False
         self.cancel: threading.Event | None = None
         self.pending_insertion: tuple[str, str] | None = None
         self.ready = False
@@ -780,17 +907,19 @@ class Companion(QObject):
         self.fallback_down = False
         self.fallback_pending = False
         self.mouse_down = False
-        self.mouse_probe_pending = False
         self.awaiting_editor_click = False
         self.pending_click_position: tuple[int, int] | None = None
         self.context_resolution_state = "waiting"
+        self.last_resolution_attempt_at = 0.0
+        self.last_request_gate_reason = ""
         self.last_keyboard_log_at = 0.0
         self.fallback_mode = False
         self.text_armed = False
         self.ime_composing = False
         self.ime_guard = windows_input.ImeGuard()
         self.app.aboutToQuit.connect(self.ime_guard.close)
-        self.monitor = DraftMonitor(self.bridge, lambda: self.last_typing_at)
+        self.monitor = DraftMonitor(self.bridge, lambda: self.last_typing_at,
+                                    lambda: self.last_activity_kind)
         self.app.aboutToQuit.connect(self.monitor.stop)
         self.session_poller = SessionPoller(self.bridge)
         self.app.aboutToQuit.connect(self.session_poller.stop)
@@ -808,14 +937,14 @@ class Companion(QObject):
         self.tray.show()
         try:
             self.tab_hook = windows_input.TabHook(
-                self.can_accept_tab, lambda: QTimer.singleShot(0, self.accept_suggestion),
-                self.note_typing, self.note_navigation)
+                self._hook_can_accept_tab, self.bridge.accept_requested.emit,
+                self._hook_key_activity, self.bridge.navigation.emit)
         except OSError as exc:
             self.tab_hook = None
             self.tray.showMessage(tr("tab_unavailable"), str(exc))
         self.app.aboutToQuit.connect(self.close_tab_hook)
         try:
-            self.mouse_hook = windows_input.MouseHook(self.note_mouse_activity)
+            self.mouse_hook = windows_input.MouseHook(self._hook_mouse_activity)
         except OSError:
             self.mouse_hook = None  # The polling fallback below still clears suggestions.
         self.app.aboutToQuit.connect(self.close_mouse_hook)
@@ -827,12 +956,38 @@ class Companion(QObject):
         self.hotkey_timer.timeout.connect(self.check_hotkeys)
         self.hotkey_timer.start(25)
         self.configure_backend()
+        self.app.aboutToQuit.connect(self.shutdown_backend)
         if config.enabled:
             self.monitor.set_active(True)
+
+    def _hook_can_accept_tab(self) -> bool:
+        hook = getattr(self, "tab_hook", None)
+        return bool(hook and hook.ready and self.accept_hwnd
+                    and windows_input.user32.GetForegroundWindow() == self.accept_hwnd)
+
+    def _hook_mouse_activity(self, x: int | None, y: int | None) -> None:
+        hook = getattr(self, "tab_hook", None)
+        if hook:
+            hook.ready = False
+        self.last_typing_at = time.monotonic()
+        self.last_activity_kind = "mouse"
+        self.monitor.wake()
+        self.bridge.mouse_activity.emit(x, y)
+
+    def _hook_key_activity(self) -> None:
+        # Publish the quiet-period timestamp before Qt handles the queued
+        # signal, so a busy settings window cannot trigger a stale UIA read.
+        hook = getattr(self, "tab_hook", None)
+        if hook:
+            hook.ready = False
+        self.last_typing_at = time.monotonic()
+        self.monitor.wake()
+        self.bridge.key_activity.emit()
 
     def refresh_menu(self) -> None:
         tray_status = ("paused" if not self.config.enabled else
                        "error" if self.backend_error else
+                       "paused" if self.model_released and self.releasing_backend is None else
                        "ready" if self.ready else "loading")
         if tray_status != self._tray_status:
             self._tray_status = tray_status
@@ -843,12 +998,16 @@ class Companion(QObject):
         self.menu.addSeparator()
         status = self.menu.addAction(tr("enabled") if self.config.enabled else tr("paused"))
         status.triggered.connect(self.toggle)
-        model_label = (tr("model_ready") if self.ready else
+        model_label = (tr("model_releasing") if self.releasing_backend is not None else
                        tr("model_unavailable") if self.backend_error else
+                       tr("model_released") if self.model_released else
+                       tr("model_ready") if self.ready else
                        tr("model_loading_status"))
         model_status = self.menu.addAction(model_label)
         model_status.setEnabled(False)
-        if not self.context_verified:
+        if self.completion_context() == []:
+            context_label = tr("draft_only_hint")
+        elif not self.context_verified:
             if self.context_resolution_state == "checking":
                 context_label = tr("context_checking")
             elif self.context_resolution_state == "waiting":
@@ -864,7 +1023,7 @@ class Companion(QObject):
         context_status = self.menu.addAction(context_label)
         context_status.setEnabled(False)
         tooltip = context_label
-        if self.context_verified and self.context_ready:
+        if self.completion_context():
             users = sum(message.role == "user" for message in self.context_messages)
             assistants = sum(message.role == "assistant" for message in self.context_messages)
             counts = tr("message_counts", users=users, assistants=assistants)
@@ -873,6 +1032,8 @@ class Companion(QObject):
             tooltip += f" | {counts}"
         self.tray.setToolTip(f"CodexCue · {tooltip}")
         self.menu.addSeparator()
+        release = self.menu.addAction(tr("release_model"), self.release_model)
+        release.setEnabled(isinstance(self.backend, OllamaBackend) and self.releasing_backend is None)
         self.menu.addAction(tr("open_logs"), self.open_log_folder)
         self.menu.addAction(tr("settings"), self.open_settings_from_shortcut)
         self.menu.addAction(tr("quit"), self.app.quit)
@@ -888,8 +1049,37 @@ class Companion(QObject):
             self.context_verified = False
             self.context_resolution_state = "waiting"
         self.invalidate()
+        if self.config.enabled and not self.ready and not self.model_released:
+            self.configure_backend()
         log_event("enabled_changed", enabled=self.config.enabled)
         self.refresh_menu()
+
+    def release_model(self) -> None:
+        if not isinstance(self.backend, OllamaBackend) or self.releasing_backend is not None:
+            return
+        backend = self.backend
+        self.backend = None
+        self.ready = False
+        self.model_released = True
+        self.releasing_backend = backend
+        self.backend_error = ""
+        self.text_armed = False
+        self.invalidate()
+        self._model_release_thread = backend.release_async(
+            lambda ok: self.bridge.model_released.emit(backend, ok))
+        self.refresh_menu()
+
+    def on_model_released(self, backend: object, ok: bool) -> None:
+        if backend is not self.releasing_backend:
+            return
+        self.releasing_backend = None
+        self.backend_error = "" if ok else tr("model_release_failed")
+        self.refresh_menu()
+        if not ok:
+            self.tray.showMessage(tr("release_model"), self.backend_error)
+        if self._backend_reconfigure_pending:
+            self._backend_reconfigure_pending = False
+            self.configure_backend()
 
     def open_log_folder(self) -> None:
         folder = log_path().parent
@@ -921,6 +1111,7 @@ class Companion(QObject):
                 or generation != self.resolver.generation
                 or hwnd != int(windows_input.user32.GetForegroundWindow() or 0)):
             return
+        previous_context = self.completion_context()
         if info is None:
             changed = self.context_verified or self.context_resolution_state != "unresolved"
             if self.context_verified:
@@ -943,6 +1134,8 @@ class Companion(QObject):
         self.active_context_label = info.preview
         self.context_verified = True
         self.context_resolution_state = "matched"
+        if previous_context != self.completion_context():
+            self.invalidate()
         self.refresh_menu()
         self.monitor.wake()
 
@@ -972,7 +1165,8 @@ class Companion(QObject):
         if sys.platform == "win32":
             windows_input.user32.SetForegroundWindow(hwnd)
         geometry = dialog.frameGeometry()
-        log_event("settings_presented", hwnd=hwnd, visible=dialog.isVisible(),
+        log_event("settings_presented", hwnd=hwnd,
+                  visible=bool(windows_input.user32.IsWindowVisible(hwnd)),
                   bounds=(geometry.left(), geometry.top(), geometry.right(), geometry.bottom()),
                   foreground=int(windows_input.user32.GetForegroundWindow() or 0))
 
@@ -1013,7 +1207,11 @@ class Companion(QObject):
             self.configure_backend()
 
     def configure_backend(self) -> None:
+        if self.releasing_backend is not None:
+            self._backend_reconfigure_pending = True
+            return
         self.invalidate()
+        self.model_released = False
         self.ready = False
         self.backend_error = ""
         self.refresh_menu()
@@ -1025,19 +1223,33 @@ class Companion(QObject):
             self.tray.showMessage(tr("backend_settings"), str(exc))
             return
         old = self.backend
+        if (isinstance(old, OllamaBackend)
+                and (old.base_url, old.model) != (new_backend.base_url, new_backend.model)):
+            # Finish unloading the previous selection before loading another.
+            # This also keeps a rapid A -> B -> A switch from unloading the new A.
+            new_backend.close()
+            self._backend_reconfigure_pending = True
+            self.release_model()
+            return
         self.backend = new_backend
-        log_event("backend_configured", backend=self.config.backend)
+        log_event("backend_configured", backend="ollama")
         if old:
-            old.close()
-        if isinstance(new_backend, OllamaBackend):
+            # A previous streaming request can still be unwinding here. Closing
+            # its HTTP client must not hold up the settings window or input hook.
+            threading.Thread(target=old.close, daemon=True).start()
+        if isinstance(new_backend, OllamaBackend) and self.config.enabled:
             if (self.text_armed and not self.draft_dirty and self.state.draft.strip()
                     and not self._ime_active()):
                 self.popup.show_text(tr("model_loading_popup"), self.bounds)
             def warm() -> None:
                 try:
+                    if new_backend is not self.backend:
+                        return
                     try:
                         _, installed = new_backend.available()
                     except Exception:
+                        if new_backend is not self.backend:
+                            return
                         executable = Path(self.config.ollama_executable)
                         if not self.config.ollama_executable or not executable.is_file():
                             raise
@@ -1053,6 +1265,8 @@ class Companion(QObject):
                         )
                         for _ in range(40):
                             time.sleep(.25)
+                            if new_backend is not self.backend:
+                                return
                             try:
                                 _, installed = new_backend.available()
                                 break
@@ -1062,14 +1276,23 @@ class Companion(QObject):
                             raise RuntimeError(tr("ollama_start_timeout"))
                     if not installed:
                         raise RuntimeError(tr("model_not_installed"))
+                    if new_backend is not self.backend:
+                        return
                     new_backend.warm()
                     self.bridge.warmed.emit(new_backend, True, "")
                 except Exception as exc:
                     self.bridge.warmed.emit(new_backend, False, str(exc))
             threading.Thread(target=warm, daemon=True).start()
-        else:
-            self.ready = True
-            self.refresh_menu()
+        self.refresh_menu()
+
+    def shutdown_backend(self) -> None:
+        self.invalidate()
+        if isinstance(self.backend, OllamaBackend):
+            self.backend.release_async().join(timeout=2.5)
+        elif self.backend:
+            self.backend.close()
+        if self._model_release_thread is not None:
+            self._model_release_thread.join(timeout=2.5)
 
     def on_warmed(self, backend: object, ok: bool, message: str) -> None:
         if backend is not self.backend:
@@ -1086,6 +1309,9 @@ class Companion(QObject):
             self.tick()
 
     def invalidate(self) -> None:
+        hook = getattr(self, "tab_hook", None)
+        if hook:
+            hook.ready = False
         if self.cancel:
             self.cancel.set()
         self.pending_insertion = None
@@ -1107,6 +1333,13 @@ class Companion(QObject):
             log_event("observation_discarded", reason="focus_changed")
             self.invalidate()
             return
+        if read is not None and int(hwnd) != self.last_codex_hwnd and self.context_verified:
+            # Clear ownership before throttling the new scan. Otherwise a quick
+            # window switch could temporarily reuse the previous task's history.
+            self.context_verified = False
+            self.context_resolution_state = "waiting"
+            self.invalidate()
+        clicked_editor = False
         if self.awaiting_editor_click:
             self.awaiting_editor_click = False
             bounds = read[1] if read is not None else None
@@ -1115,13 +1348,35 @@ class Companion(QObject):
                               and bounds[0] <= point[0] < bounds[2]
                               and bounds[1] <= point[1] < bounds[3])
             self.pending_click_position = None
-            if (read is not None
-                    and clicked_editor
-                    and (not self.context_verified or int(hwnd) != self.last_codex_hwnd)):
+        if (read is not None
+                and (not self.context_verified or int(hwnd) != self.last_codex_hwnd)
+                and (clicked_editor or (self.last_read is None and self.last_typing_at == 0)
+                     or (self.last_activity_kind == "keyboard"
+                                        and self.text_armed and bool(read[0].strip())))):
+            now = time.monotonic()
+            retry_after = 2.0 if self.context_resolution_state == "checking" else 1.0
+            if clicked_editor or now - getattr(self, "last_resolution_attempt_at", 0) >= retry_after:
+                if self.context_verified:
+                    self.context_verified = False
+                    self.invalidate()
                 self.context_resolution_state = "checking"
+                self.last_resolution_attempt_at = now
                 self.resolver.wake()
-        if not self.tailer:
-            return
+                self.refresh_menu()
+            else:
+                # Throttling must defer a retry, not silently lose the only
+                # settled edit after a fast task switch. Force a fresh UIA
+                # observation; never replay the cached draft as a new read.
+                resolver_generation = self.resolver.generation
+                def retry_if_current() -> None:
+                    if (self.config.enabled and not self.context_verified
+                            and self.monitor.generation == generation
+                            and self.last_typing_at == typing_at
+                            and self.resolver.generation == resolver_generation
+                            and int(hwnd) == windows_input.user32.GetForegroundWindow()):
+                        self.monitor.set_active(True)
+                delay = max(1, int((retry_after - (now - self.last_resolution_attempt_at)) * 1000) + 1)
+                QTimer.singleShot(delay, self, retry_if_current)
         if self.pending_insertion is not None:
             previous, _suffix = self.pending_insertion
             self.pending_insertion = None
@@ -1160,7 +1415,7 @@ class Companion(QObject):
             self.popup.hide()
         elif (previous_bounds != self.bounds and self.state.suggestion and not self.draft_dirty
               and self.text_armed and self.context_verified and not self._ime_active()):
-            self.popup.show_text(self.state.suggestion, self.bounds, suggest=True)
+            self.show_suggestion(self.state.suggestion)
         if (self.context_verified and self.text_armed and not self.draft_dirty
                 and self.state.draft.strip() and not self.ready
                 and isinstance(self.backend, OllamaBackend) and not self._ime_active()):
@@ -1190,25 +1445,42 @@ class Companion(QObject):
         fallback = windows_input.shortcut_pressed(0x44)
         if fallback and not self.fallback_down:
             self.fallback_pending = True
-        if self.fallback_pending and windows_input.modifiers_released() and self.tailer:
+        if self.fallback_pending and windows_input.modifiers_released():
             self.fallback_pending = False
             self.fallback_draft()
         self.fallback_down = fallback
 
     def can_accept_tab(self) -> bool:
-        return (self.config.enabled and not self.inserting and not self.draft_dirty
-                and not self._ime_active()
-                and self.text_armed and self.context_verified
-                and bool(self.state.suggestion)
-                and (self.fallback_mode or
-                     (self.last_read is not None and self.last_read[0] == self.state.draft))
-                and self.popup.isVisible() and self.accept_hwnd != 0
-                and windows_input.user32.GetForegroundWindow() == self.accept_hwnd)
+        return (self.editor_snapshot().rejection() == "ready"
+                and bool(self.state.suggestion) and self.popup.isVisible())
+
+    def completion_context(self) -> list:
+        if self.context_verified and self.context_ready and self.tailer:
+            if any(message.role == "user" for message in self.context_messages):
+                return self.context_messages
+        return []
+
+    def editor_snapshot(self) -> EditorSnapshot:
+        return EditorSnapshot(
+            enabled=self.config.enabled, inserting=self.inserting, dirty=self.draft_dirty,
+            pending_activity=self.input_activity_pending, armed=self.text_armed,
+            composing=self._ime_active(), draft=self.state.draft,
+            read_matches=self.fallback_mode or (self.last_read is not None
+                                                and self.last_read[0] == self.state.draft),
+            hwnd=self.accept_hwnd, foreground=int(windows_input.user32.GetForegroundWindow() or 0),
+            has_bounds=bool(self.bounds), quiet_seconds=time.monotonic() - self.last_typing_at,
+            context_allowed=True)
+
+    def show_suggestion(self, text: str) -> None:
+        self.popup.show_text(text, self.bounds, suggest=True, fallback=self.fallback_mode)
 
     def note_typing(self) -> None:
-        # This runs inside the low-level keyboard hook: only write simple state.
+        # Delivered on the Qt thread after the hook records activity.
         if not self.config.enabled:
             return
+        hook = getattr(self, "tab_hook", None)
+        if hook:
+            hook.ready = False
         self.last_typing_at = time.monotonic()
         self.draft_dirty = True
         self.awaiting_committed_edit = True
@@ -1223,6 +1495,9 @@ class Companion(QObject):
     def note_mouse_activity(self, x: int | None = None, y: int | None = None) -> None:
         if not self.config.enabled:
             return
+        hook = getattr(self, "tab_hook", None)
+        if hook:
+            hook.ready = False
         self.last_typing_at = time.monotonic()
         self.draft_dirty = True
         self.text_armed = False
@@ -1239,10 +1514,8 @@ class Companion(QObject):
         if not inside_editor:
             self.context_verified = False
             self.context_resolution_state = "waiting"
-        # A sidebar or other-app click never starts a task scan. A known
-        # editor click takes the fast path; a new window waits for a valid
-        # draft observation from the background UIA monitor.
-        self.mouse_probe_pending = inside_editor and not self.context_verified
+        # The background UIA monitor must verify the focused editor before
+        # starting a task scan; coordinates alone can hit an overlay or stale box.
 
     def note_navigation(self) -> None:
         self.note_mouse_activity()
@@ -1258,6 +1531,11 @@ class Companion(QObject):
             self.mouse_hook.close()
 
     def tick(self) -> None:
+        now = time.monotonic()
+        previous_tick = getattr(self, "_previous_tick", now)
+        self._previous_tick = now
+        if now - previous_tick > .125:
+            log_event("main_loop_delay", latency_ms=round((now - previous_tick - .025) * 1000))
         composing = self._ime_active()
         if composing != getattr(self, "ime_composing", False):
             self.ime_composing = composing
@@ -1279,37 +1557,46 @@ class Companion(QObject):
                     self.last_keyboard_log_at = time.monotonic()
             if self.state.active is not None or self.state.suggestion or self.popup.isVisible():
                 self.invalidate()
-        if self.mouse_probe_pending:
-            self.mouse_probe_pending = False
-            if (self.config.enabled
-                    and self.last_codex_hwnd
-                    and windows_input.user32.GetForegroundWindow() == self.last_codex_hwnd):
-                self.awaiting_editor_click = False
-                self.pending_click_position = None
-                self.context_resolution_state = "checking"
-                self.resolver.wake()
         if (self.popup.isVisible() and self.accept_hwnd
                 and windows_input.user32.GetForegroundWindow() != self.accept_hwnd):
             self.invalidate()
-        if self.inserting or not self.config.enabled or not self.tailer:
+        hook = getattr(self, "tab_hook", None)
+        if hook:
+            hook.ready = self.can_accept_tab()
+        if self.inserting or not self.config.enabled:
             return
         now = time.monotonic()
-        if (self.ready and self.context_ready and self.context_verified and not self.draft_dirty
-                and self.text_armed and not composing
-                and now - self.last_typing_at >= 0.3
-                and (self.last_read is not None or self.fallback_mode) and self.state.ready(now)):
+        if not self.text_armed or not self.state.draft.strip():
+            return
+        reason = self.editor_snapshot().rejection()
+        if reason == "ready" and self.model_released and self.releasing_backend is None:
+            self.configure_backend()
+        if reason == "ready":
+            reason = ("backend_unavailable" if not self.ready else
+                      "already_requested" if not self.state.ready(now) else "ready")
+        if reason != getattr(self, "last_request_gate_reason", ""):
+            self.last_request_gate_reason = reason
+            log_event("request_gate", reason=reason)
+        if reason == "ready":
             self.start_request()
 
     def fallback_draft(self) -> None:
+        hwnd = int(windows_input.user32.GetForegroundWindow() or 0)
         draft = windows_input.copy_draft_fallback(self.app.clipboard())
-        if draft is not None and self.tailer:
+        if hwnd != windows_input.user32.GetForegroundWindow():
+            self.invalidate()
+            return
+        if draft is not None and self.config.enabled:
+            if hwnd != self.last_codex_hwnd:
+                self.context_verified = False
             self.fallback_mode = True
             self.awaiting_committed_edit = False
             self.text_armed = bool(draft.strip())
             self.last_read = None
             self.draft_dirty = False
             self.bounds = windows_input.foreground_bounds()
-            self.accept_hwnd = windows_input.user32.GetForegroundWindow()
+            self.accept_hwnd = hwnd
+            self.input_activity_pending = False
             self.state.observe(draft, self.context_revision, time.monotonic())
             self.popup.hide()
 
@@ -1326,6 +1613,8 @@ class Companion(QObject):
         finally:
             self.inserting = False
         if inserted:
+            log_event("suggestion_accepted", generation=self.state.generation,
+                      suggestion_len=len(suggestion))
             if self.cancel:
                 self.cancel.set()
             self.pending_insertion = None if used_fallback else (current, suggestion)
@@ -1341,39 +1630,40 @@ class Companion(QObject):
             self.tray.showMessage(tr("insert_failed"), tr("focus_codex_first"))
 
     def start_request(self) -> None:
-        if (not self.backend or not self.tailer or not self.context_ready
-                or not self.context_verified or self._ime_active()):
+        context = self.completion_context()
+        if (not self.backend or not self.ready
+                or self.editor_snapshot().rejection() != "ready"
+                or not self.state.ready(time.monotonic())):
             return
-        if not any(message.role == "user" for message in self.context_messages):
-            return  # An assistant-only review task is not a user conversation.
         token = self.state.start()
         self.request_started_at = time.monotonic()
         log_event("request_started", generation=token.generation,
                   draft_len=len(token.draft), revision=token.context_revision,
-                  hwnd=self.accept_hwnd, context_count=len(self.context_messages),
-                  context_chars=sum(len(message.text) for message in self.context_messages),
-                  context_roles=("".join(message.role[0] for message in self.context_messages)
+                  hwnd=self.accept_hwnd, context_count=len(context),
+                  context_chars=sum(len(message.text) for message in context),
+                  context_roles=("".join(message.role[0] for message in context)
                                  or "none"))
-        request = SuggestionRequest(self.context_messages, token.draft)
+        request = SuggestionRequest(context, token.draft)
         self.cancel = self.inference.submit(token, request, self.backend)
 
     def on_finished(self, token: RequestToken, text: str) -> None:
         if self.state.finish(token, text):
-            shown = bool(text and self.state.draft.strip() and not self.draft_dirty
-                    and not self._ime_active()
-                    and self.context_verified
-                    and self.text_armed and not self.input_activity_pending
-                    and (self.last_read is not None or self.fallback_mode)
-                    and self.accept_hwnd
-                    and windows_input.user32.GetForegroundWindow() == self.accept_hwnd
-                    and self.bounds)
-            log_event("request_finished", generation=token.generation,
-                      suggestion_len=len(text), shown=shown,
-                      latency_ms=round((time.monotonic() - self.request_started_at) * 1000))
+            shown = bool(text and self.editor_snapshot().rejection() == "ready")
             if shown:
-                self.popup.show_text(text, self.bounds, suggest=True)
+                self.show_suggestion(text)
+                shown = self.popup.isVisible()
+                log_event("suggestion_latency", generation=token.generation,
+                          latency_ms=round((time.monotonic() - self.last_typing_at) * 1000),
+                          shown=self.popup.isVisible())
+                hook = getattr(self, "tab_hook", None)
+                if hook:
+                    hook.ready = self.can_accept_tab()
             else:
                 self.popup.hide()
+            log_event("request_finished", generation=token.generation,
+                      suggestion_len=len(text), shown=shown,
+                      reason="shown" if shown else ("empty_suffix" if not text else "snapshot_invalid"),
+                      latency_ms=round((time.monotonic() - self.request_started_at) * 1000))
         else:
             log_event("request_discarded", generation=token.generation)
 
@@ -1389,8 +1679,24 @@ def main() -> int:
     if sys.platform != "win32":
         print("This application requires Windows.", file=sys.stderr)
         return 1
+    from .startup import normalize_startup
+    relaunched = normalize_startup()
+    if relaunched is not None:
+        return relaunched
+    if "--startup-test" in sys.argv[1:]:
+        from .startup_acceptance import main as startup_main
+        return startup_main([arg for arg in sys.argv[1:] if arg != "--startup-test"])
+    if "--self-test" in sys.argv[1:]:
+        from .acceptance import main as acceptance_main
+        return acceptance_main([arg for arg in sys.argv[1:] if arg != "--self-test"])
     background = "--background" in sys.argv[1:]
-    instance = _acquire_single_instance(notify_existing=not background)
+    return run_application(background=background)
+
+
+def run_application(*, background: bool = False, config: AppConfig | None = None,
+                    instance_name: str = "Local\\CodexCue.Main", on_ready=None) -> int:
+    """The normal tray lifecycle, also exercised by isolated startup acceptance."""
+    instance = _acquire_single_instance(instance_name, notify_existing=not background)
     if instance is None:
         return 0
     kernel32, handle, open_event = instance
@@ -1400,9 +1706,10 @@ def main() -> int:
         app = QApplication([arg for arg in sys.argv if arg != "--background"])
         app.setWindowIcon(app_icon())
         app.setQuitOnLastWindowClosed(False)
-        first_run = not existing_config_path().exists()
-        config = AppConfig.load()
-        if first_run and not SettingsDialog(config).exec():
+        first_run = config is None and not existing_config_path().exists()
+        config = config if config is not None else AppConfig.load()
+        needs_setup = first_run or getattr(config, "recovery_required", False)
+        if needs_setup and not SettingsDialog(config).exec():
             return 0
         companion = Companion(app, config)
         # Keep the controller alive for the lifetime of the Qt event loop.
@@ -1412,8 +1719,10 @@ def main() -> int:
             lambda: _handle_shortcut_requests(kernel32, open_event, companion))
         shortcut_timer.start(100)
         app._shortcut_timer = shortcut_timer
-        if not background and not first_run:
+        if not background and not needs_setup:
             QTimer.singleShot(0, companion.open_settings)
+        if on_ready is not None:
+            QTimer.singleShot(0, lambda: on_ready(companion))
         return app.exec()
     finally:
         kernel32.CloseHandle(handle)

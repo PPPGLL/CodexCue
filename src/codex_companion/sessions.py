@@ -4,7 +4,8 @@ import json
 import re
 import time
 import unicodedata
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -29,6 +30,8 @@ class SessionInfo:
     recent_roles: tuple[Role, ...] = field(default=(), repr=False, compare=False)
     match_texts: tuple[str, ...] = field(default=(), repr=False, compare=False)
     opening_text: str = field(default="", repr=False, compare=False)
+    task_title: str = field(default="", repr=False, compare=False)
+    title_is_unique: bool = field(default=True, repr=False, compare=False)
 
 _AMBIENT_PREFIXES = ("recommended_plugins", "environment_context", "in-app-browser-context")
 _REVIEW_PREFIX = "The following is the Codex agent history "
@@ -124,6 +127,11 @@ def parse_record(line: str) -> tuple[dict | None, Message | None]:
 def _canonical(text: str) -> str:
     return "".join(char.lower() for char in unicodedata.normalize("NFKC", text)
                    if char.isalnum())
+
+
+def _title_key(text: str) -> str:
+    # Preserve punctuation: "A/B" and "AB" need not identify the same task.
+    return " ".join(unicodedata.normalize("NFKC", text).split()).casefold()
 
 
 def recent_messages(path: Path, limit: int = 6,
@@ -255,8 +263,46 @@ class SessionIndex:
         self.cache: dict[Path, tuple[tuple[int, int], SessionInfo]] = {}
         self.paths: list[tuple[Path, tuple[int, int]]] = []
         self.paths_at = 0.0
+        self.titles: dict[str, str] = {}
+        self.title_counts: Counter[str] = Counter()
+        self.title_signature: tuple[int, int] | None = None
+
+    def _refresh_titles(self) -> None:
+        path = self.root.parent / "session_index.jsonl"
+        try:
+            stat = path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns)
+            if signature == self.title_signature:
+                return
+            titles = {}
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue  # The app may be appending a partial record.
+                    if not isinstance(row, dict):
+                        continue
+                    identity, title = row.get("id"), row.get("thread_name")
+                    if (isinstance(identity, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identity)
+                            and isinstance(title, str) and title.strip()):
+                        titles[identity] = title  # Latest appended rename wins.
+        except (OSError, UnicodeError):
+            self.titles = {}
+            self.title_counts = Counter()
+            self.title_signature = None
+            return
+        self.titles = titles
+        self.title_counts = Counter(_title_key(title) for title in titles.values())
+        self.title_signature = signature
+
+    def _with_title(self, info: SessionInfo) -> SessionInfo:
+        title = self.titles.get(info.id, "")
+        return replace(info, task_title=title,
+                       title_is_unique=self.title_counts[_title_key(title)] == 1)
 
     def list(self, *, force_refresh: bool = False) -> list[SessionInfo]:
+        self._refresh_titles()
         if not self.root.exists():
             return []
         now = time.monotonic()
@@ -280,8 +326,24 @@ class SessionIndex:
             del self.cache[path]
         if refreshed:
             self.paths_at = time.monotonic()
-        return sorted((info for _, info in self.cache.values()),
+        return sorted((self._with_title(info) for _, info in self.cache.values()),
                       key=lambda info: info.last_event_at, reverse=True)[:self.limit]
+
+    def candidates(self, visible_texts: list[str], *, force_refresh: bool = False) -> list[SessionInfo]:
+        infos = self.list(force_refresh=True) if force_refresh else self.list()
+        known = {info.id for info in infos}
+        visible = {_title_key(text) for text in visible_texts}
+        # An old task opened without a new log event may be outside the recent
+        # 80. Resolve its indexed id directly, without parsing every old rollout.
+        for identity, title in self.titles.items():
+            if identity in known or _title_key(title) not in visible:
+                continue
+            for path in self.root.glob(f"*/*/*/rollout-*{identity}.jsonl"):
+                info = describe_session(path, with_recent=True)
+                if info is not None and info.id == identity:
+                    infos.append(self._with_title(info))
+                    break
+        return infos
 
 
 def _match_task_title(title: str, infos: list[SessionInfo]) -> SessionInfo | None:
@@ -325,6 +387,14 @@ def _match_unique_visible_title(visible_texts: list[str],
 
 def match_visible_session(visible_texts: list[str], infos: list[SessionInfo]) -> SessionInfo | None:
     """Match visible conversation text to one local log; ambiguous matches are unsafe."""
+    visible_titles = {_title_key(text) for text in visible_texts if 2 <= len(text.strip()) <= 200}
+    exact_titles = [info for info in infos if info.task_title
+                    and _title_key(info.task_title) in visible_titles]
+    if exact_titles:
+        if (len(exact_titles) == 1 and exact_titles[0].title_is_unique
+                and (not exact_titles[0].recent_roles or "user" in exact_titles[0].recent_roles)):
+            return exact_titles[0]
+        return None  # Never break a known title collision by guessing at its wording.
     fragments: set[str] = set()
     for raw in visible_texts:
         visible = _canonical(raw)

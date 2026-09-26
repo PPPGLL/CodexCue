@@ -1,7 +1,9 @@
 from PySide6.QtCore import QRect
 import random
 
-from codex_companion.app import popup_position
+import pytest
+
+from codex_companion.app import SuggestionPopup, popup_position
 
 
 class Screen:
@@ -48,8 +50,9 @@ def test_hides_when_no_non_overlapping_position_exists():
     assert popup_position((0, 0, 800, 600), 350, 83, [screen]) is None
 
 
-def test_all_returned_positions_avoid_editor():
-    screen = Screen(QRect(0, 0, 1200, 800), 1)
+@pytest.mark.parametrize("ratio", [1.0, 1.25, 1.5, 2.0])
+def test_all_returned_positions_avoid_editor(ratio):
+    screen = Screen(QRect(0, 0, 1200, 800), ratio)
     rng = random.Random(42)
     area = screen.availableGeometry().adjusted(6, 6, -6, -6)
     for _ in range(300):
@@ -57,8 +60,64 @@ def test_all_returned_positions_avoid_editor():
         top = rng.randrange(0, 700)
         right = rng.randrange(left + 1, 1201)
         bottom = rng.randrange(top + 1, 801)
-        point = popup_position((left, top, right, bottom), 350, 83, [screen])
+        width, height = rng.choice((338, 480)), rng.choice((48, 77, 111, 180))
+        bounds = tuple(round(p * ratio) for p in (left, top, right, bottom))
+        point = popup_position(bounds, width, height, [screen])
         if point is not None:
-            popup = QRect(point.x(), point.y(), 350, 83)
+            popup = QRect(point.x(), point.y(), width, height)
             assert area.contains(popup)
             assert not popup.intersects(QRect(left, top, right - left, bottom - top))
+
+
+def physical_bounds(editor, screen):
+    origin = screen.geometry().topLeft()
+    return tuple(o + round((p - o) * screen.devicePixelRatio()) for p, o in zip(
+        (editor.left(), editor.top(), editor.x() + editor.width(), editor.y() + editor.height()),
+        (origin.x(), origin.y(), origin.x(), origin.y())))
+
+
+@pytest.mark.parametrize("text", [
+    "First line to inspect.\nSecond line to adjust.\nThird line to verify.",
+    "请检查标题与正文的对齐，适当增加段落间距，让长文本在较窄的窗口中自然换行，确认所有内容都能完整显示。",
+    "Please check the spacing between headings and paragraphs. Keep long text readable "
+    "when the window gets narrower, and make sure the existing controls remain visible.",
+])
+@pytest.mark.parametrize("initial", ["Loading model...", "A short suggestion."])
+def test_growing_popup_stays_clear_of_editor_throughout_animation(qapp, qtbot, initial, text):
+    screen = qapp.primaryScreen()
+    area = screen.availableGeometry()
+    editor = QRect(area.left() + 80, area.bottom() - 55, min(650, area.width() - 160), 40)
+    bounds = physical_bounds(editor, screen)
+    popup = SuggestionPopup()
+    qtbot.addWidget(popup)
+    popup.show_text(initial, bounds, suggest=initial != "Loading model...")
+    popup._appear.setCurrentTime(35)
+    previous_height = popup.height()
+    popup.show_text(text, bounds, suggest=True)
+    assert popup.height() > previous_height
+    assert popup.label.text() == text
+    for _ in range(15):
+        assert popup.isVisible()
+        assert area.contains(popup.frameGeometry())
+        assert popup.label.parentWidget().rect().contains(popup.label.geometry())
+        assert popup.frameGeometry().bottom() < editor.top()
+        assert not popup.frameGeometry().intersects(editor)
+        qtbot.wait(10)
+
+
+def test_moving_editor_during_appearance_does_not_restore_old_position(qapp, qtbot):
+    screen = qapp.primaryScreen()
+    area = screen.availableGeometry()
+    editor = QRect(area.left() + 80, area.bottom() - 55, min(650, area.width() - 160), 40)
+    popup = SuggestionPopup()
+    qtbot.addWidget(popup)
+    text = "First line.\nSecond line.\nThird line."
+    popup.show_text(text, physical_bounds(editor, screen), suggest=True)
+    popup._appear.setCurrentTime(35)
+    editor.translate(0, -popup.height())
+    popup.show_text(text, physical_bounds(editor, screen), suggest=True)
+    placed = popup.pos()
+    for _ in range(15):
+        assert popup.pos() == placed
+        assert not popup.frameGeometry().intersects(editor)
+        qtbot.wait(10)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 import time
 from ctypes import wintypes
 from typing import Callable
@@ -114,6 +115,13 @@ class ImeGuard:
             self.handle = None
 
 
+def _is_codex_desktop_process(name: str, executable: str) -> bool:
+    name = name.lower()
+    executable = executable.lower().replace("/", "\\")
+    return ((name == "chatgpt.exe" and "\\windowsapps\\openai.codex_" in executable)
+            or (name == "codex.exe" and "\\openai\\codex\\" in executable))
+
+
 def _codex_foreground() -> bool:
     hwnd = user32.GetForegroundWindow()
     if not hwnd:
@@ -122,13 +130,11 @@ def _codex_foreground() -> bool:
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     try:
         process = psutil.Process(pid.value)
-        for candidate in [process, *process.parents()]:
-            name = candidate.name().lower()
-            if "codex" in name or "openai.codex" in candidate.exe().lower():
-                return True
+        # Only the owner of the foreground window counts. A helper launched by
+        # Codex can have codex.exe in its ancestor chain without being Codex UI.
+        return _is_codex_desktop_process(process.name(), process.exe())
     except (psutil.Error, OSError):
         return False
-    return False
 
 
 def _vscode_foreground() -> bool:
@@ -170,8 +176,11 @@ def _editor() -> object | None:
     control = auto.GetFocusedControl()
     if not control or control.ControlTypeName not in {"EditControl", "DocumentControl"}:
         return None
+    # Codex windows also expose other editable/document controls (including a
+    # full-window document). Only the composer is a ProseMirror control.
+    if "ProseMirror" not in (control.ClassName or ""):
+        return None
     if _vscode_foreground() and (control.ControlTypeName != "EditControl"
-                                 or "ProseMirror" not in (control.ClassName or "")
                                  or _vscode_thread_root(control) is None):
         return None
     return control
@@ -225,6 +234,7 @@ def visible_conversation_texts() -> list[str]:
         # enough results to reach the title while bounding the UIA traversal.
         pending = [(window, 0)]
         found: list[str] = []
+        short_labels: list[str] = []
         visited = 0
         deadline = time.monotonic() + (.28 if vscode else .12)
         while (pending and visited < (360 if vscode else 240)
@@ -241,9 +251,11 @@ def visible_conversation_texts() -> list[str]:
                 name = control.Name.strip()
                 if len(name) >= 8:
                     found.append(name[:1000])
+                elif len(name) >= 2 and len(short_labels) < 16:
+                    short_labels.append(name)  # Short task titles use exact index matching only.
             if depth < 14:
                 pending.extend((child, depth + 1) for child in control.GetChildren())
-        return found
+        return found + short_labels
     except Exception:
         return []
 
@@ -271,8 +283,14 @@ def cursor_position() -> tuple[int, int] | None:
     return point.x, point.y
 
 
+# Ignore our own clipboard shortcuts without ignoring input from IMEs, voice
+# typing, accessibility software, or remote keyboards.
+_OWN_INPUT_TAG = 0x43435545
+user32.keybd_event.argtypes = (wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t)
+
+
 def _key(vk: int, up: bool = False) -> None:
-    user32.keybd_event(vk, 0, 2 if up else 0, 0)
+    user32.keybd_event(vk, 0, 2 if up else 0, _OWN_INPUT_TAG)
 
 
 def copy_draft_fallback(clipboard) -> str | None:
@@ -402,9 +420,60 @@ user32.CallNextHookEx.restype = ctypes.c_ssize_t
 user32.UnhookWindowsHookEx.argtypes = (ctypes.c_void_p,)
 kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
 kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+user32.GetMessageW.argtypes = (ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                               wintypes.UINT, wintypes.UINT)
+user32.GetMessageW.restype = ctypes.c_int
+user32.PostThreadMessageW.argtypes = (wintypes.DWORD, wintypes.UINT,
+                                      wintypes.WPARAM, wintypes.LPARAM)
+user32.PostThreadMessageW.restype = wintypes.BOOL
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 
 
-class TabHook:
+class _LowLevelHook:
+    """Pump a global hook off the Qt thread so Qt cannot stall system input."""
+
+    def _install(self, kind: int, callback: _HookProc, error_message: str) -> None:
+        self.handle = None
+        self.thread_id = 0
+        ready = threading.Event()
+        failure: list[OSError] = []
+
+        def run() -> None:
+            self.thread_id = kernel32.GetCurrentThreadId()
+            message = wintypes.MSG()
+            user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 0)
+            self.handle = user32.SetWindowsHookExW(
+                kind, callback, kernel32.GetModuleHandleW(None), 0)
+            if not self.handle:
+                failure.append(OSError(ctypes.get_last_error(), error_message))
+                ready.set()
+                return
+            ready.set()
+            try:
+                while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+                    user32.TranslateMessage(ctypes.byref(message))
+                    user32.DispatchMessageW(ctypes.byref(message))
+            finally:
+                user32.UnhookWindowsHookEx(self.handle)
+                self.handle = None
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+        if not ready.wait(2):
+            raise OSError(error_message + " timed out")
+        if failure:
+            raise failure[0]
+
+    def close(self) -> None:
+        if getattr(self, "thread_id", 0):
+            user32.PostThreadMessageW(self.thread_id, 0x12, 0, 0)  # WM_QUIT
+            self.thread_id = 0
+        thread = getattr(self, "_thread", None)
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=0.2)
+
+
+class TabHook(_LowLevelHook):
     """Consume Tab only while a suggestion belongs to the focused Codex window."""
 
     def __init__(self, should_accept: Callable[[], bool], accepted: Callable[[], None],
@@ -415,27 +484,26 @@ class TabHook:
         self.on_activity = on_activity
         self.on_focus_change = on_focus_change
         self.pressed = False
+        self.ready = False
         self._callback = _HookProc(self._on_key)
-        self.handle = user32.SetWindowsHookExW(
-            13, self._callback, kernel32.GetModuleHandleW(None), 0)  # WH_KEYBOARD_LL
-        if not self.handle:
-            raise OSError(ctypes.get_last_error(), "Cannot install Tab keyboard hook")
+        self._install(13, self._callback, "Cannot install Tab keyboard hook")
 
     def _on_key(self, code: int, message: int, pointer: int) -> int:
         if code < 0:
             return user32.CallNextHookEx(self.handle, code, message, pointer)
         event = ctypes.cast(pointer, ctypes.POINTER(_KeyboardEvent)).contents
-        if (message in (0x100, 0x104) and not (event.flags & 0x10)
+        if event.flags & 0x10 and event.dwExtraInfo == _OWN_INPUT_TAG:
+            return user32.CallNextHookEx(self.handle, code, message, pointer)
+        if (message in (0x100, 0x104)
                 and getattr(self, "on_focus_change", None)
-                and ((event.vkCode == 0x09 and any(
-                    user32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x11, 0x12)))
-                     or (event.vkCode in (0x21, 0x22)
-                         and user32.GetAsyncKeyState(0x11) & 0x8000))):
+                and event.vkCode in (0x21, 0x22)
+                and user32.GetAsyncKeyState(0x11) & 0x8000):
+            self.ready = False
             self.on_focus_change()
-        if (message in (0x100, 0x104) and not (event.flags & 0x10)
+        if (message in (0x100, 0x104)
                 and _may_change_text(event.vkCode) and self.on_activity):
-            # The callback must stay cheap. Tracking physical activity globally
-            # also covers typing before the first Codex editor read succeeds.
+            if hasattr(self, "ready"):
+                self.ready = False
             self.on_activity()
         if event.vkCode == 0x09:  # VK_TAB
             if message in (0x100, 0x104):  # WM_KEYDOWN / WM_SYSKEYDOWN
@@ -444,24 +512,25 @@ class TabHook:
                 if not any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x10, 0x11, 0x12)):
                     if self.should_accept():
                         self.pressed = True
+                        if hasattr(self, "ready"):
+                            self.ready = False
                         self.accepted()
                         return 1
+                # Tab that was not accepted (including Shift+Tab) can move focus
+                # within the same window. HWND equality no longer proves focus.
+                if getattr(self, "on_focus_change", None):
+                    self.ready = False
+                    self.on_focus_change()
             elif message in (0x101, 0x105) and self.pressed:  # key up
                 self.pressed = False
                 return 1
         return user32.CallNextHookEx(self.handle, code, message, pointer)
 
-    def close(self) -> None:
-        if self.handle:
-            user32.UnhookWindowsHookEx(self.handle)
-            self.handle = None
-
-
 def _may_change_text(vk: int) -> bool:
-    if vk in {0x08, 0x20, 0x2e, 0xe5}:  # Backspace, Space, Delete, IME composition
+    if vk in {0x08, 0x0d, 0x20, 0x2e, 0xe5, 0xe7}:  # Enter, IME and Unicode VK_PACKET.
         return True
-    if vk in {0x09, 0x0d, 0x1b} or 0x21 <= vk <= 0x28 or 0x70 <= vk <= 0x87:
-        return False  # Tab, Enter, Escape, navigation and function keys
+    if vk in {0x09, 0x1b} or 0x21 <= vk <= 0x28 or 0x70 <= vk <= 0x87:
+        return False  # Tab, Escape, navigation and function keys
     if 0x30 <= vk <= 0x5a or 0x60 <= vk <= 0x6f or 0xba <= vk <= 0xe2:
         if user32.GetAsyncKeyState(0x11) & 0x8000:  # Ctrl shortcuts
             return vk in {0x56, 0x58, 0x59, 0x5a}  # Paste, cut, redo, undo
@@ -475,16 +544,13 @@ class _MouseEvent(ctypes.Structure):
                 ("dwExtraInfo", ctypes.c_size_t)]
 
 
-class MouseHook:
+class MouseHook(_LowLevelHook):
     """Invalidate an editor snapshot on every mouse click, including short clicks."""
 
     def __init__(self, on_click: Callable[[int | None, int | None], None]) -> None:
         self.on_click = on_click
         self._callback = _HookProc(self._on_mouse)
-        self.handle = user32.SetWindowsHookExW(
-            14, self._callback, kernel32.GetModuleHandleW(None), 0)  # WH_MOUSE_LL
-        if not self.handle:
-            raise OSError(ctypes.get_last_error(), "Cannot install mouse hook")
+        self._install(14, self._callback, "Cannot install mouse hook")
 
     def _on_mouse(self, code: int, message: int, pointer: int) -> int:
         if code >= 0 and message in {0x201, 0x204, 0x207, 0x20b}:
@@ -494,8 +560,3 @@ class MouseHook:
             else:
                 self.on_click(None, None)
         return user32.CallNextHookEx(self.handle, code, message, pointer)
-
-    def close(self) -> None:
-        if self.handle:
-            user32.UnhookWindowsHookEx(self.handle)
-            self.handle = None

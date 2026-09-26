@@ -1,9 +1,42 @@
 import pytest
 import ctypes
+import threading
 from types import SimpleNamespace
 from PySide6.QtCore import QCoreApplication, QMimeData, QTimer
 
 pytestmark = pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows only")
+
+
+def test_codexcue_settings_are_not_treated_as_codex_desktop():
+    from codex_companion import windows_input as wi
+
+    assert wi._is_codex_desktop_process(
+        "ChatGPT.exe", r"C:\Program Files\WindowsApps\OpenAI.Codex_26.917\app\ChatGPT.exe")
+    assert wi._is_codex_desktop_process(
+        "codex.exe", r"C:\Users\user\AppData\Local\OpenAI\Codex\bin\codex.exe")
+    assert not wi._is_codex_desktop_process(
+        "CodexCue.exe", r"D:\PGL\对话补全\dist\CodexCue\CodexCue.exe")
+    assert not wi._is_codex_desktop_process(
+        "codex.exe", r"C:\Users\user\.vscode\extensions\openai.chatgpt\bin\codex.exe")
+
+
+def test_foreground_does_not_inherit_codex_identity_from_parent(monkeypatch):
+    from codex_companion import windows_input as wi
+
+    def get_pid(_hwnd, pointer):
+        ctypes.cast(pointer, ctypes.POINTER(ctypes.c_ulong)).contents.value = 42
+
+    monkeypatch.setattr(wi, "user32", SimpleNamespace(
+        GetForegroundWindow=lambda: 100, GetWindowThreadProcessId=get_pid))
+    process = SimpleNamespace(
+        name=lambda: "CodexCue.exe",
+        exe=lambda: r"D:\PGL\对话补全\dist\CodexCue\CodexCue.exe",
+        parents=lambda: [SimpleNamespace(
+            name=lambda: "codex.exe",
+            exe=lambda: r"C:\Users\user\AppData\Local\OpenAI\Codex\bin\codex.exe")],
+    )
+    monkeypatch.setattr(wi.psutil, "Process", lambda _pid: process)
+    assert not wi._codex_foreground()
 
 
 def test_empty_prosemirror_placeholder_is_not_a_draft(monkeypatch):
@@ -22,6 +55,22 @@ def test_empty_prosemirror_placeholder_is_not_a_draft(monkeypatch):
     assert wi.read_draft() == ("", (1, 2, 101, 52))
     children.clear()  # The user actually typed the same words as the placeholder.
     assert wi.read_draft() == ("\n随心输入", (1, 2, 101, 52))
+
+
+def test_codex_document_control_is_not_the_composer(monkeypatch):
+    from codex_companion import windows_input as wi
+    import uiautomation as auto
+
+    full_window = SimpleNamespace(ControlTypeName="DocumentControl",
+                                  ClassName="webview ready")
+    composer = SimpleNamespace(ControlTypeName="EditControl",
+                               ClassName="ProseMirror ProseMirror-focused")
+    monkeypatch.setattr(wi, "_codex_foreground", lambda: True)
+    monkeypatch.setattr(wi, "_vscode_foreground", lambda: False)
+    monkeypatch.setattr(auto, "GetFocusedControl", lambda: full_window)
+    assert wi._editor() is None
+    monkeypatch.setattr(auto, "GetFocusedControl", lambda: composer)
+    assert wi._editor() is composer
 
 
 def test_ime_guard_tracks_candidate_window_and_native_composition(monkeypatch):
@@ -225,6 +274,28 @@ def test_tab_hook_consumes_only_active_suggestion(monkeypatch):
     assert accepted == [True]
 
 
+def test_tab_hook_installs_off_the_caller_thread(monkeypatch):
+    from codex_companion import windows_input as wi
+
+    installed_on = []
+    monkeypatch.setattr(wi.kernel32, "GetCurrentThreadId", lambda: 123)
+    monkeypatch.setattr(wi.user32, "PeekMessageW", lambda *_: 0)
+    monkeypatch.setattr(wi.user32, "GetMessageW", lambda *_: 0)
+    monkeypatch.setattr(wi.user32, "UnhookWindowsHookEx", lambda *_: True)
+    monkeypatch.setattr(wi.user32, "PostThreadMessageW", lambda *_: True)
+
+    def install(*_args):
+        installed_on.append(threading.get_ident())
+        return 1
+
+    monkeypatch.setattr(wi.user32, "SetWindowsHookExW", install)
+    hook = wi.TabHook(lambda: False, lambda: None)
+    try:
+        assert installed_on and installed_on[0] != threading.get_ident()
+    finally:
+        hook.close()
+
+
 def test_tab_hook_marks_real_typing_before_editor_detection(monkeypatch):
     from codex_companion import windows_input as wi
 
@@ -240,14 +311,73 @@ def test_tab_hook_marks_real_typing_before_editor_detection(monkeypatch):
     key = wi._KeyboardEvent()
     key.vkCode = 0x41
     assert hook._on_key(0, 0x100, ctypes.addressof(key)) == 0
-    key.flags = 0x10  # injected paste keys do not count as user typing
-    hook._on_key(0, 0x100, ctypes.addressof(key))
-    key.flags = 0
     key.vkCode = 0x10  # modifier keys do not change the draft
     hook._on_key(0, 0x100, ctypes.addressof(key))
     key.vkCode = 0x25  # navigation does not arm a blank editor
     hook._on_key(0, 0x100, ctypes.addressof(key))
     assert activity == [True]
+
+
+@pytest.mark.parametrize("vk,flags", [(0x41, 0x10), (0xe7, 0x10), (0xe7, 0), (0xe5, 0)])
+def test_external_input_reaches_draft_detection(monkeypatch, vk, flags):
+    from codex_companion import windows_input as wi
+
+    activity = []
+    hook = object.__new__(wi.TabHook)
+    hook.handle = 1
+    hook.ready = True
+    hook.on_activity = lambda: activity.append(True)
+    hook.on_focus_change = None
+    monkeypatch.setattr(wi.user32, "CallNextHookEx", lambda *_: 0)
+    monkeypatch.setattr(wi.user32, "GetAsyncKeyState", lambda _: 0)
+    event = wi._KeyboardEvent(vkCode=vk, flags=flags)
+    pointer = ctypes.addressof(event)
+    hook._on_key(0, 0x100, pointer)
+    hook._on_key(0, 0x101, pointer)
+    assert activity == [True]
+    assert not hook.ready
+
+
+@pytest.mark.parametrize("vk", [0x56, 0x43, 0x09, 0xe7])
+def test_own_shortcuts_do_not_rearm_or_accept_completion(monkeypatch, vk):
+    from codex_companion import windows_input as wi
+
+    emitted = []
+    monkeypatch.setattr(wi.user32, "keybd_event", lambda *args: emitted.append(args))
+    wi._key(vk)
+    wi._key(vk, True)
+    hook = object.__new__(wi.TabHook)
+    hook.handle = 1
+    hook.ready = True
+    hook.on_activity = lambda: pytest.fail("Own paste must not trigger another completion")
+    hook.on_focus_change = lambda: pytest.fail("Own shortcut must not invalidate focus")
+    hook.should_accept = lambda: pytest.fail("Own shortcut must not accept a suggestion")
+    monkeypatch.setattr(wi.user32, "CallNextHookEx", lambda *_: 0)
+    for key, _scan, flags, tag in emitted:
+        assert tag != 0
+        event = wi._KeyboardEvent(vkCode=key, flags=0x10, dwExtraInfo=tag)
+        hook._on_key(0, 0x101 if flags & 2 else 0x100, ctypes.addressof(event))
+    assert hook.ready
+
+
+@pytest.mark.parametrize("vk", [0x09, 0x21, 0x22])
+def test_external_injected_navigation_invalidates_focus(monkeypatch, vk):
+    from codex_companion import windows_input as wi
+
+    navigation = []
+    hook = object.__new__(wi.TabHook)
+    hook.handle = 1
+    hook.ready = True
+    hook.pressed = False
+    hook.on_activity = lambda: pytest.fail("Navigation must not arm completion")
+    hook.on_focus_change = lambda: navigation.append(True)
+    hook.should_accept = lambda: pytest.fail("Ctrl navigation must not accept")
+    monkeypatch.setattr(wi.user32, "CallNextHookEx", lambda *_: 0)
+    monkeypatch.setattr(wi.user32, "GetAsyncKeyState", lambda key: 0x8000 if key == 0x11 else 0)
+    event = wi._KeyboardEvent(vkCode=vk, flags=0x10)
+    hook._on_key(0, 0x100, ctypes.addressof(event))
+    assert navigation == [True]
+    assert not hook.ready
 
 
 def test_ctrl_tab_requests_context_switch_without_accepting_suggestion(monkeypatch):
@@ -270,6 +400,47 @@ def test_ctrl_tab_requests_context_switch_without_accepting_suggestion(monkeypat
     assert hook._on_key(0, 0x100, ctypes.addressof(tab)) == 0
     assert navigations == [True]
     assert accepted == []
+
+
+@pytest.mark.parametrize("shift", [False, True])
+def test_enter_and_shift_enter_invalidate_the_draft(monkeypatch, shift):
+    from codex_companion import windows_input as wi
+
+    activity = []
+    hook = object.__new__(wi.TabHook)
+    hook.ready = True
+    hook.handle = 1
+    hook.on_activity = lambda: activity.append(True)
+    hook.on_focus_change = None
+    monkeypatch.setattr(wi.user32, "CallNextHookEx", lambda *_: 0)
+    monkeypatch.setattr(wi.user32, "GetAsyncKeyState",
+                        lambda vk: 0x8000 if shift and vk == 0x10 else 0)
+    event = wi._KeyboardEvent()
+    event.vkCode = 0x0d
+    hook._on_key(0, 0x100, ctypes.addressof(event))
+    assert activity == [True]
+    assert not hook.ready
+
+
+def test_shift_tab_invalidates_focus_before_another_tab_can_be_accepted(monkeypatch):
+    from codex_companion import windows_input as wi
+
+    navigation = []
+    hook = object.__new__(wi.TabHook)
+    hook.handle = 1
+    hook.ready = True
+    hook.pressed = False
+    hook.on_activity = None
+    hook.on_focus_change = lambda: navigation.append(True)
+    hook.should_accept = lambda: hook.ready
+    hook.accepted = lambda: pytest.fail("Shift+Tab must preserve navigation")
+    monkeypatch.setattr(wi.user32, "CallNextHookEx", lambda *_: 0)
+    monkeypatch.setattr(wi.user32, "GetAsyncKeyState", lambda vk: 0x8000 if vk == 0x10 else 0)
+    event = wi._KeyboardEvent()
+    event.vkCode = 0x09
+    assert hook._on_key(0, 0x100, ctypes.addressof(event)) == 0
+    assert navigation == [True]
+    assert not hook.ready
 
 
 def test_mouse_hook_sees_a_short_click(monkeypatch):

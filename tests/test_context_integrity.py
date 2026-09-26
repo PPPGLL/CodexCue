@@ -6,8 +6,7 @@ import threading
 
 import httpx
 
-from codex_companion.model import (OllamaBackend, OpenAICompatibleBackend,
-                                   SuggestionRequest)
+from codex_companion.model import (OllamaBackend, SuggestionRequest)
 from codex_companion.sessions import (Message, SessionTailer, describe_session,
                                       match_visible_session, recent_messages)
 
@@ -22,7 +21,7 @@ def _record(role: str, text: str, *, phase: str | None = None,
     return {"type": "response_item", "payload": payload}
 
 
-def test_only_typed_user_and_final_assistant_turns_reach_both_models(tmp_path):
+def test_only_typed_user_and_final_assistant_turns_reach_the_model(tmp_path):
     path = tmp_path / "rollout-demo.jsonl"
     runtime = ("<recommended_plugins>RUNTIME_PLUGIN_LIST</recommended_plugins>\n"
                "# AGENTS.md instructions\n<INSTRUCTIONS>RUNTIME_AGENTS</INSTRUCTIONS>\n"
@@ -83,37 +82,25 @@ def test_only_typed_user_and_final_assistant_turns_reach_both_models(tmp_path):
 
     def ollama_handler(http_request):
         captured["ollama"] = json.loads(http_request.content)
-        return httpx.Response(200, text='{"response":"补全","done":true}\n')
-
-    def cloud_handler(http_request):
-        captured["cloud"] = json.loads(http_request.content)
-        return httpx.Response(200, text='data: [DONE]\n\n')
+        return httpx.Response(200, text=json.dumps({"message": {
+            "content": '{"continuation":"请继续补全"}'}, "done": True}) + '\n')
 
     ollama = OllamaBackend("http://127.0.0.1:11434", "qwen3:4b-instruct",
                            httpx.MockTransport(ollama_handler))
-    cloud = OpenAICompatibleBackend("https://example.com/v1", "mock", "test-key",
-                                    httpx.MockTransport(cloud_handler))
     try:
         ollama.suggest(request, lambda _: None, threading.Event())
-        cloud.suggest(request, lambda _: None, threading.Event())
     finally:
         ollama.close()
-        cloud.close()
 
-    prompt = captured["ollama"]["prompt"]
-    assert prompt.count("<|im_start|>user\n") == 1
-    assert prompt.count("<|im_start|>assistant\n") == 1
-    assert prompt.endswith("草稿：请继续<|im_end|>\n<|im_start|>assistant\n")
-    for item in expected:
-        assert f"{item.role}: {item.text}" in prompt
-    cloud_history = captured["cloud"]["messages"][1:-1]
-    assert cloud_history == [{"role": item.role, "content": item.text} for item in expected]
+    data = json.loads(captured["ollama"]["messages"][-1]["content"])
+    assert data["draft"] == "请继续"
+    assert data["background"] == [{"speaker": item.role, "text": item.text} for item in expected]
+    prompt = json.dumps(captured["ollama"], ensure_ascii=False)
     for unwanted in ("RUNTIME_", "REVIEW_TRANSCRIPT", "REVIEW_MULTIPART",
                      "FAKE_USER_HISTORY", "FAKE_ASSISTANT_HISTORY", "FAKE_TOOL_RESULT",
                      "HANDOFF_SUMMARY", "SECRET",
                      "screenshot.png", "BROWSER_STATE", "Distinguish instructions"):
         assert unwanted not in prompt
-        assert unwanted not in json.dumps(captured["cloud"], ensure_ascii=False)
 
 
 def test_user_envelope_cleanup_keeps_ordinary_quoted_text(tmp_path):

@@ -1,7 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
 from pathlib import Path
+import json
+import subprocess
+import tomllib
+from PyInstaller.config import CONF
 import uiautomation
+
+root = Path(SPECPATH)
+build_info = Path(CONF['workpath']) / 'build-info.json'
+build_info.parent.mkdir(parents=True, exist_ok=True)
+build_info.write_text(json.dumps({
+    'version': tomllib.loads((root / 'pyproject.toml').read_text(encoding='utf-8'))['project']['version'],
+    'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
+    'dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=root, text=True).strip()),
+}), encoding='utf-8')
 
 uiautomation_bin = Path(uiautomation.__file__).resolve().parent / 'bin'
 uiautomation_dlls = [(str(path), 'uiautomation/bin')
@@ -11,8 +23,8 @@ a = Analysis(
     ['run_companion.py'],
     pathex=['src'],
     binaries=uiautomation_dlls,
-    datas=[],
-    hiddenimports=collect_submodules('keyring.backends') + ['uiautomation'],
+    datas=[(str(build_info), '.')],
+    hiddenimports=['uiautomation'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

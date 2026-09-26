@@ -22,5 +22,5 @@ function Invoke-WebRequest {
     Copy-Item -LiteralPath $fakeInstaller -Destination $OutFile -Force
 }
 
-. (Join-Path $repo 'scripts\setup.ps1') -AppOnly -ForceUvInstall
+. (Join-Path $repo 'scripts\setup.ps1') -EnvironmentOnly -ForceUvInstall
 if (-not (Test-Path -LiteralPath $localUv)) { throw 'Local uv was not installed.' }

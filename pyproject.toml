@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codexcue"
-version = "0.1.0"
+version = "0.1.0b2"
 description = "A local, opt-in autocomplete companion for Codex on Windows"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -15,7 +15,6 @@ dependencies = [
   "httpx>=0.28,<1",
   "uiautomation>=2.0,<3",
   "psutil>=6,<8",
-  "keyring>=25,<27",
 ]
 
 [project.scripts]
