@@ -390,6 +390,33 @@ def main(argv=None) -> int:
             check("maximized_fallback_native_visible", bool(wi.user32.IsWindowVisible(int(companion.popup.winId()))))
             check("maximized_fallback_popup_on_screen", any(
                 screen.availableGeometry().contains(companion.popup.frameGeometry()) for screen in app.screens()))
+
+            # Reproduce a short popup becoming multiline before its entrance
+            # ends. Read native physical window bounds against the real UIA
+            # editor, including the frames after the obsolete animation ends.
+            companion.invalidate()
+            companion.text_armed = False
+            editor_bounds = wi.read_draft()[1]
+            popup = companion.popup
+            samples = []
+            for initial, suggest in (("Loading model...", False), ("A short suggestion.", True)):
+                popup.hide()
+                popup.show_text(initial, editor_bounds, suggest=suggest)
+                popup._appear.setCurrentTime(35)
+                popup.show_text("First line to inspect.\nSecond line to adjust.\nThird line to verify.",
+                                editor_bounds, suggest=True)
+                for _ in range(15):
+                    rect = wi.wintypes.RECT()
+                    if not wi.user32.GetWindowRect(ctypes.c_void_p(int(popup.winId())), ctypes.byref(rect)):
+                        raise AssertionError("Could not read native popup rectangle")
+                    left, top, right, bottom = editor_bounds
+                    if not (rect.bottom <= top or rect.top >= bottom or rect.right <= left or rect.left >= right):
+                        raise AssertionError("Multiline popup overlapped the editor")
+                    samples.append([rect.left, rect.top, rect.right, rect.bottom])
+                    QTest.qWait(10)
+                check("multiline_popup_stays_above_native_editor", popup.isVisible()
+                      and rect.bottom <= editor_bounds[1])
+            report["popup_geometry"] = {"editor": editor_bounds, "samples": samples}
             companion.config.save = lambda: None
             companion.toggle()
             wait_for(app, lambda: not companion.popup.isVisible(), "pause clears suggestion")

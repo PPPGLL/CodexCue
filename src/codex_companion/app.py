@@ -447,6 +447,7 @@ class SuggestionPopup(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 3, 5, 7)
         card = QFrame()
+        self._card = card
         card.setObjectName("suggestionCard")
         card_layout = QHBoxLayout(card)
         card_layout.setContentsMargins(10, 7, 9, 7)
@@ -493,6 +494,10 @@ class SuggestionPopup(QWidget):
         if not bounds:
             self.hide()
             return
+        # A previous entrance still targets its old height/position. Stop it
+        # before resizing so it cannot move a taller card back over the draft.
+        self._appear.stop()
+        self.setWindowOpacity(1.0)
         preview = text
         # Detailed requests need a wider card so the full insert stays readable.
         screen = QApplication.screenAt(QPoint(bounds[0], bounds[3])) or QApplication.primaryScreen()
@@ -512,6 +517,12 @@ class SuggestionPopup(QWidget):
         line_height = self.label.fontMetrics().lineSpacing()
         self.label.setFixedHeight(max(line_height, wrapped.height()))
         self.hint.setVisible(suggest)
+        # Child size changes can leave the outer size hint cached until the
+        # next event-loop turn. Resolve both layouts before choosing a position.
+        self._card.layout().invalidate()
+        self._card.layout().activate()
+        self.layout().invalidate()
+        self.layout().activate()
         self.adjustSize()
         point = popup_position(bounds, self.width(), self.height(), QApplication.screens(), fallback=fallback)
         if point is None:
@@ -532,7 +543,6 @@ class SuggestionPopup(QWidget):
                 self.setWindowOpacity(0.82)
             self.show()
             if not was_visible:
-                self._appear.stop()
                 self._fade.setStartValue(0.82)
                 self._fade.setEndValue(1.0)
                 self._rise.setStartValue(start)
