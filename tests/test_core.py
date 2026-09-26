@@ -157,8 +157,7 @@ def test_recent_messages_searches_past_large_tool_record(tmp_path):
 def test_stale_request_and_switch_are_ignored():
     state = SuggestionState()
     state.observe("请帮我", 1, 0)
-    assert not state.ready(.2)
-    assert state.ready(.31)
+    assert state.ready(0)
     old = state.start()
     state.observe("请帮我写", 1, .4)
     assert not state.partial(old, "一首诗")

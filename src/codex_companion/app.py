@@ -27,7 +27,7 @@ from .diagnostics import log_event, log_path, setup_logging
 from .i18n import tr
 from .model import OllamaBackend, SuggestionRequest, make_backend
 from .sessions import SessionIndex, SessionTailer, match_visible_session
-from .state import EditorSnapshot, RequestToken, SuggestionState
+from .state import KEYBOARD_QUIET_SECONDS, EditorSnapshot, RequestToken, SuggestionState
 from . import windows_input
 
 
@@ -91,7 +91,7 @@ class DraftMonitor:
                 generation = self.generation
                 if self.active:
                     typing_at = self.last_typing_at()
-                    quiet = 0.15 if self.last_activity_kind() == "mouse" else 0.3
+                    quiet = 0.15 if self.last_activity_kind() == "mouse" else KEYBOARD_QUIET_SECONDS
                     quiet_remaining = quiet - (time.monotonic() - typing_at)
                     if quiet_remaining > 0:
                         self.changed.wait(quiet_remaining)
@@ -975,13 +975,14 @@ class Companion(QObject):
         self.bridge.mouse_activity.emit(x, y)
 
     def _hook_key_activity(self) -> None:
-        # Publish the quiet-period timestamp before Qt handles the queued
-        # signal, so a busy settings window cannot trigger a stale UIA read.
+        # Close the acceptance gate before Qt receives the key signal. With no
+        # debounce, a timestamp alone cannot prevent a stale suggestion's Tab.
         hook = getattr(self, "tab_hook", None)
         if hook:
             hook.ready = False
         self.last_typing_at = time.monotonic()
-        self.monitor.wake()
+        self.draft_dirty = True
+        self.input_activity_pending = True
         self.bridge.key_activity.emit()
 
     def refresh_menu(self) -> None:
@@ -1378,8 +1379,12 @@ class Companion(QObject):
                 delay = max(1, int((retry_after - (now - self.last_resolution_attempt_at)) * 1000) + 1)
                 QTimer.singleShot(delay, self, retry_if_current)
         if self.pending_insertion is not None:
-            previous, _suffix = self.pending_insertion
+            previous, suffix = self.pending_insertion
+            if read is not None and read[0] == previous and time.monotonic() - typing_at < .25:
+                self.draft_dirty = True
+                return  # The host may not have committed the paste to UIA yet.
             self.pending_insertion = None
+            self.text_armed = read is not None and read[0] == previous + suffix
             if read is not None and read[0] == previous:
                 self.tray.showMessage(tr("insert_not_applied"), tr("confirm_codex_focus"))
         waiting_for_commit = (self.awaiting_committed_edit and read is not None
@@ -1619,9 +1624,14 @@ class Companion(QObject):
                 self.cancel.set()
             self.pending_insertion = None if used_fallback else (current, suggestion)
             self.fallback_mode = False
-            self.text_armed = False  # Wait for the next user edit before generating again.
+            self.text_armed = False  # Rearm only after UIA confirms the accepted suffix.
             self.awaiting_committed_edit = False
             self.last_typing_at = time.monotonic()
+            insertion_at = self.last_typing_at
+            def confirm_paste() -> None:
+                if self.pending_insertion is not None and self.last_typing_at == insertion_at:
+                    self.monitor.set_active(True)
+            QTimer.singleShot(250, confirm_paste)
             self.draft_dirty = True
             self.monitor.wake()
             self.state.observe(current + suggestion, self.context_revision, time.monotonic())

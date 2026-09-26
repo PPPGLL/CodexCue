@@ -32,6 +32,7 @@ from . import windows_input as wi
 TITLE_A = "补全功能的识别验证"  # Nine-character title, no visible message body.
 TITLE_B = "另一个测试任务"
 SUFFIX = " the current settings."
+NEXT_SUFFIX = " Check the failure path too."
 DETAIL_DRAFT = "页面的行间距看起来不一致，调整一下"
 DETAIL_ITEMS = ["检查页面标题与正文各自的行间距是否一致，明确哪些位置存在过密或过疏的问题，便于逐项调整。",
                 "比较相邻段落的留白关系，让同类内容保持清晰的阅读节奏，同时保留现有文字和布局顺序。",
@@ -85,6 +86,8 @@ class ModelHandler(BaseHTTPRequestHandler):
             self.server.release.wait(5)
         data = json.loads(payload["messages"][-1]["content"]) if payload.get("messages") else {"anchor": ""}
         suffix = "。" + "".join(DETAIL_ITEMS) if data.get("draft") == DETAIL_DRAFT else SUFFIX
+        if data.get("draft") == "Please inspect" + SUFFIX:
+            suffix = NEXT_SUFFIX
         result = {"continuation": data["anchor"] + suffix}
         body = json.dumps({"message": {"content": json.dumps(result)}, "done": True}).encode() + b"\n"
         self.send_response(200)
@@ -266,14 +269,15 @@ def main(argv=None) -> int:
                            "end_to_end_ms": round((time.monotonic() - began) * 1000),
                            "shown": companion.popup.isVisible()}
                     report["model_results"].append(row)
-                    if draft.endswith("？"):
-                        check("complete_question_has_no_continuation", not suffix and not companion.popup.isVisible())
-                    else:
+                    if suffix:
                         check("live_model_suffix_visible", bool(suffix) and companion.can_accept_tab())
                         check("live_model_keeps_user_voice", not any(text in suffix for text in
                               ("有什么我可以帮", "我可以帮你", "好的，我会", "我来帮你")))
+                        if draft.endswith("？"):
+                            check("complete_question_adds_user_followup", not suffix.startswith(("是的", "因为", "已经", "没有")))
                         if draft in detailed_drafts:
-                            check("rough_request_expanded", 60 <= len(suffix) <= 180)
+                            row["suffix_chars"] = len(suffix)
+                            check("rough_request_stays_concise", len(suffix) <= 80)
                             check("details_finish_a_sentence", suffix.endswith(("。", ".", "？", "?", "！", "!")))
                             check("details_do_not_invent_numbers", not any(c.isdigit() for c in suffix))
                         if draft.startswith("先不要动代码"):
@@ -282,6 +286,8 @@ def main(argv=None) -> int:
                         wait_for(app, lambda: window.editor.text() == draft + suffix, "live suffix native paste")
                         check("live_model_paste_does_not_send", window.submissions == 0)
                         QTest.qWait(300)  # Let the production clipboard restoration finish.
+                    else:
+                        check("live_model_suffix_visible", False)
                 # Reuse the actual packaged backend with adversarial synthetic
                 # history, so semantic regression is checked beyond text length.
                 from .quality_checks import check_context_grounding
@@ -339,10 +345,16 @@ def main(argv=None) -> int:
             wait_for(app, lambda: app.clipboard().text() == clipboard_before, "clipboard restoration")
             check("clipboard_restored", True)
             check("tab_does_not_send", window.submissions == 0)
-            request_count = len(server.requests)
-            QTest.qWait(500)
-            check("own_paste_does_not_trigger_completion", len(server.requests) == request_count
-                  and not companion.text_armed and not companion.popup.isVisible())
+            wait_for(app, lambda: companion.can_accept_tab(), "next suggestion after accepted paste")
+            check("next_request_uses_accepted_text", server.requests[-1]["draft"] == "Please inspect" + SUFFIX)
+            check("next_popup_matches_suffix", companion.state.suggestion == NEXT_SUFFIX)
+            check("second_tab_consumed", key(0x09) == 1)
+            wait_for(app, lambda: window.editor.text() == "Please inspect" + SUFFIX + NEXT_SUFFIX,
+                     "consecutive Tab paste readback")
+            QTest.qWait(300)
+            check("only_tab_inserts_next_suggestion", window.editor.text() == "Please inspect" + SUFFIX + NEXT_SUFFIX)
+            check("consecutive_tabs_preserve_clipboard", app.clipboard().text() == clipboard_before)
+            check("consecutive_tabs_do_not_send", window.submissions == 0)
 
             # Enter invalidates a pending request, then the synthetic host clears
             # its own editor. A late response must not revive the old suggestion.

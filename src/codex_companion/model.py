@@ -70,10 +70,10 @@ def draft_anchor(draft: str) -> str:
     # Keep control characters out of Ollama's regex-constrained JSON string;
     # the full multiline draft remains available in the quoted input.
     line = re.split(r"[\r\n\t]", draft)[-1]
-    # Keep the unfinished Chinese sentence as the anchor. Copying several
-    # repeated earlier sentences can make a small model stop at the anchor.
+    # Keep a short, verbatim cursor anchor. Copying a whole sentence increases
+    # output work and can make the model finish the copied thought too early.
     fragment = re.split(r"[。！？]", line)[-1]
-    return (fragment if fragment.strip() else line)[-48:]
+    return (fragment if fragment.strip() else line)[-12:]
 
 
 def continuation_schema(draft: str) -> dict:
@@ -125,13 +125,10 @@ def build_messages(request: SuggestionRequest) -> list[dict[str, str]]:
 
 
 def can_continue(draft: str) -> bool:
-    text = draft.strip()
-    return bool(text) and not text.endswith(("?", "？"))
+    return bool(draft.strip())
 
 
 def normalize_suggestion(raw: str, draft: str, limit: int = MAX_SUGGESTION_CHARS) -> str:
-    if draft.rstrip().endswith(("?", "？")):
-        return ""  # A completed question must never become its own answer.
     if "<think>" in raw and "</think>" not in raw:
         return ""
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
@@ -140,6 +137,8 @@ def normalize_suggestion(raw: str, draft: str, limit: int = MAX_SUGGESTION_CHARS
         raw = raw[len(draft) :]
     elif draft and draft.startswith(raw):
         return ""  # A partial echo of the draft is not a continuation.
+    if not any(char.isalnum() for char in raw):
+        return ""  # A lone separator is not useful writing; request a real continuation.
     if len(raw) <= limit:
         return raw
     # Keep complete requirements instead of cutting a word or sentence in half.
@@ -160,7 +159,7 @@ def decode_suggestion(raw: str, draft: str) -> str:
     if not value["continuation"].startswith(anchor):
         log_event("completion_output", reason="changed_anchor", raw_len=len(raw), suggestion_len=0)
         raise ValueError("Completion model changed the existing draft")
-    suffix = "" if draft.rstrip().endswith(("?", "？")) else normalize_suggestion(value["continuation"][len(anchor):], "")
+    suffix = normalize_suggestion(value["continuation"][len(anchor):], "")
     reason = "suffix" if suffix else "model_empty"
     log_event("completion_output", reason=reason, raw_len=len(raw), suggestion_len=len(suffix))
     return suffix
@@ -191,18 +190,22 @@ async def complete_request(read, request: SuggestionRequest) -> str:
     messages = build_messages(request)
     for attempt in range(2):
         raw = await read(messages, schema, COMPLETION_TOKENS)
+        copied = False
         try:
             suffix = decode_suggestion(raw, request.draft)
-            if suffix and not repeats_input(suffix, request):
+            copied = bool(suffix) and repeats_input(suffix, request)
+            if suffix and not copied:
                 return suffix
         except ValueError:
             pass
         if attempt == 0:
             log_event("completion_retry", reason="invalid_continuation")
-            # Do not feed the bad response back to the model. Remove copied
-            # background while preserving the user's exact current draft.
-            messages = build_messages(SuggestionRequest([], request.draft))
-            messages[0]["content"] += "\n重新续写：保留 anchor，接上新的文字；不要复述背景、草稿或生成规则。"
+            # Keep facts for format/empty-output repairs. Remove contaminated
+            # background only when the model actually copied it.
+            messages = build_messages(SuggestionRequest([] if copied else request.messages, request.draft))
+            messages[0]["content"] += ("\nContinue at the cursor with new words, not punctuation alone. "
+                                      "Finish the unfinished phrase first; if already complete, add a related "
+                                      "follow-up from the user. Do not repeat background or writing rules.")
     return ""
 
 

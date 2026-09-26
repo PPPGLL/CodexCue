@@ -148,7 +148,7 @@ def test_first_message_can_complete_without_a_session(monkeypatch):
     assert len(sent) == 1 and sent[0].messages == []
 
 
-@pytest.mark.parametrize("invalid", ["dirty", "pending", "focus", "ime", "read", "quiet"])
+@pytest.mark.parametrize("invalid", ["dirty", "pending", "focus", "ime", "read"])
 def test_request_display_and_acceptance_share_the_same_snapshot_guard(monkeypatch, invalid):
     from codex_companion import windows_input
     companion = controller()
@@ -163,7 +163,6 @@ def test_request_display_and_acceptance_share_the_same_snapshot_guard(monkeypatc
     companion.input_activity_pending = invalid == "pending"
     companion.ime_guard = SimpleNamespace(active_for=lambda _: invalid == "ime")
     if invalid == "read": companion.last_read = ("stale draft", companion.bounds)
-    if invalid == "quiet": companion.last_typing_at = time.monotonic()
     companion.start_request()
     assert not sent
     token = companion.state.start()
@@ -187,11 +186,16 @@ def test_continuation_keeps_spaces_midword_and_long_draft_boundary():
         decode_suggestion('{"continuation":"rewritten input"}', 'original input')
 
 
-def test_completed_question_does_not_call_model():
-    backend = OllamaBackend("http://127.0.0.1:11434", "test", httpx.MockTransport(
-        lambda _: pytest.fail("A complete question should not request an answer")))
+def test_completed_question_can_continue_the_users_request():
+    from codex_companion.model import draft_anchor
+    draft = "Why did it fail?"
+    suffix = " Please check the logs before changing anything."
+    def respond(request):
+        raw = json.dumps({"continuation": draft_anchor(draft) + suffix})
+        return httpx.Response(200, content=json.dumps({"message": {"content": raw}, "done": True}) + "\n")
+    backend = OllamaBackend("http://127.0.0.1:11434", "test", httpx.MockTransport(respond))
     try:
-        assert backend.suggest(SuggestionRequest([], "Why did it fail?"), lambda _: None, threading.Event()) == ""
+        assert backend.suggest(SuggestionRequest([], draft), lambda _: None, threading.Event()) == suffix
     finally:
         backend.close()
 

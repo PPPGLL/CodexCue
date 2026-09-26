@@ -249,6 +249,41 @@ def test_clipboard_change_during_paste_is_preserved(monkeypatch):
     assert clipboard.text() == "用户新复制的内容"
 
 
+@pytest.mark.parametrize("user_copy", [False, True])
+def test_consecutive_pastes_restore_original_or_new_user_clipboard(monkeypatch, user_copy):
+    from codex_companion import windows_input as wi
+
+    original = QMimeData()
+    original.setText("original")
+    original.setHtml("<b>original</b>")
+    contents = [original]
+    clipboard = SimpleNamespace(mimeData=lambda: contents[0], setMimeData=lambda data: contents.__setitem__(0, data))
+    sequence = [10]
+    timers = []
+    def set_text(text):
+        data = QMimeData()
+        data.setText(text)
+        contents[0] = data
+        sequence[0] += 1
+        return True
+    monkeypatch.setattr(wi, "_pending_clipboard_restore", None)
+    monkeypatch.setattr(wi, "_set_unicode_clipboard", set_text)
+    monkeypatch.setattr(wi, "_key", lambda *_: None)
+    monkeypatch.setattr(wi.user32, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(wi.user32, "GetClipboardSequenceNumber", lambda: sequence[0])
+    monkeypatch.setattr(QTimer, "singleShot", lambda _ms, fn: timers.append(fn))
+    assert wi.insert_text("first suffix", clipboard, expected_hwnd=123)
+    if user_copy:
+        set_text("new user copy")
+    assert wi.insert_text("second suffix", clipboard, expected_hwnd=123)
+    timers[0]()
+    assert contents[0].text() == "second suffix"
+    timers[1]()
+    assert contents[0].text() == ("new user copy" if user_copy else "original")
+    if not user_copy:
+        assert contents[0].html() == "<b>original</b>"
+
+
 def test_tab_hook_consumes_only_active_suggestion(monkeypatch):
     from codex_companion import windows_input as wi
 

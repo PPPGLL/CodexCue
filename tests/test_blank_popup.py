@@ -359,7 +359,41 @@ def test_tab_inserts_from_verified_snapshot_without_sync_uia(monkeypatch):
     companion.on_observed(1, ("请帮我写一首诗", companion.bounds),
                           123, companion.last_typing_at)
     assert companion.pending_insertion is None
+    assert companion.text_armed
+    assert companion.state.ready(time.monotonic())
     assert notices == []
+
+
+def test_next_tab_waits_for_paste_readback_and_ignores_stale_editor(monkeypatch):
+    from codex_companion import windows_input
+
+    companion = controller()
+    companion.fallback_mode = False
+    companion.state.observe("草稿接上的文字", 1, 0)
+    companion.pending_insertion = ("草稿", "接上的文字")
+    companion.text_armed = False
+    companion.draft_dirty = True
+    companion.last_typing_at = time.monotonic()
+    companion.last_read = ("草稿", companion.bounds)
+    monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 123)
+    companion.on_observed(1, ("草稿", companion.bounds), 123, companion.last_typing_at)
+    assert companion.pending_insertion is not None
+    assert companion.draft_dirty and not companion.text_armed
+    companion.on_observed(1, ("草稿接上的文字", companion.bounds), 123, companion.last_typing_at)
+    assert companion.pending_insertion is None
+    assert companion.text_armed and not companion.draft_dirty
+
+
+def test_paste_mismatch_cannot_rearm_next_completion(monkeypatch):
+    from codex_companion import windows_input
+
+    companion = controller()
+    companion.pending_insertion = ("草稿", "接上的文字")
+    companion.text_armed = False
+    monkeypatch.setattr(windows_input.user32, "GetForegroundWindow", lambda: 123)
+    companion.on_observed(1, ("另一段文字", companion.bounds), 123, companion.last_typing_at)
+    assert companion.pending_insertion is None
+    assert not companion.text_armed
 
 
 def test_late_context_from_previous_task_is_ignored():

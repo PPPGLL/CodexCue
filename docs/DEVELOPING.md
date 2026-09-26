@@ -82,7 +82,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Packag
 
 ## 日常维护
 
-- **模型效果**：`scripts/check_completion_quality.py` 记录合成输入与模型输出；检查是否续写、是否重复、是否编造要求。长度和 JSON 正确只是基础条件。
+- **模型效果**：按[基准说明](BENCHMARK.md)运行 `scripts/benchmark_completion.py`，固定输入比较提示词与延迟，再审读是否续写、重复或编造要求。默认每次补一小段，Tab 插入经 UIA 确认后继续生成；没有固定键盘等待，但输入法、焦点和草稿确认仍须通过。
 - **运行指标**：`scripts/report_metrics.py` 统计等待时间、Tab 采用、请求失败和 UI 停顿。缺失样本记为未知，不能当作零错误。
 - **文案和视觉**：README 聚焦用途、开始使用和关键选项；技术细节放入本文与发布文档。动画使用合成文字，并支持减少动态效果。
 - **用户数据**：`.local/`、`.venv/`、`dist/`、日志、真实对话和本机配置只留在本机。回归用例使用新写的合成内容。

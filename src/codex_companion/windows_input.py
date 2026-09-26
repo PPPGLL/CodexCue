@@ -352,6 +352,9 @@ def _set_unicode_clipboard(text: str) -> bool:
         user32.CloseClipboard()
 
 
+_pending_clipboard_restore = None
+
+
 def insert_text(text: str, clipboard, *, allow_fallback: bool = False,
                 expected_hwnd: int | None = None) -> bool:
     """Paste Unicode text immediately; restore the clipboard after the target reads it."""
@@ -366,19 +369,29 @@ def insert_text(text: str, clipboard, *, allow_fallback: bool = False,
         return False
     from PySide6.QtCore import QMimeData, QTimer
 
-    previous = clipboard.mimeData()
-    saved = QMimeData()
-    if previous is not None:
-        for fmt in previous.formats():
-            saved.setData(fmt, previous.data(fmt))
+    global _pending_clipboard_restore
+    pending = _pending_clipboard_restore
+    if pending is not None and pending[0] is clipboard and pending[1] == user32.GetClipboardSequenceNumber():
+        saved = pending[2]  # Consecutive Tab presses must restore the original clipboard.
+    else:
+        previous = clipboard.mimeData()
+        saved = QMimeData()
+        if previous is not None:
+            for fmt in previous.formats():
+                saved.setData(fmt, previous.data(fmt))
     if not _set_unicode_clipboard(text):
         return False
     sequence = user32.GetClipboardSequenceNumber()
+    _pending_clipboard_restore = (clipboard, sequence, saved)
 
     def restore() -> None:
+        global _pending_clipboard_restore
         # Leave a clipboard change made by the user or another app untouched.
-        if user32.GetClipboardSequenceNumber() == sequence:
-            clipboard.setMimeData(saved)
+        if (_pending_clipboard_restore is not None and _pending_clipboard_restore[0] is clipboard
+                and _pending_clipboard_restore[1] == sequence):
+            if user32.GetClipboardSequenceNumber() == sequence:
+                clipboard.setMimeData(saved)
+            _pending_clipboard_restore = None
 
     try:
         # The accepted suggestion is always a suffix.

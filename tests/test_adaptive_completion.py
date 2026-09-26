@@ -32,7 +32,8 @@ def test_anchor_keeps_current_sentence_and_preserves_numbers_and_paths():
     draft = "重复的前文。" * 10 + "请检查初始化的"
     assert draft_anchor(draft) == "请检查初始化的"
     assert decode_suggestion(json.dumps({"continuation": "请检查初始化的顺序。"}), draft) == "顺序。"
-    assert draft_anchor("rate 3.14 config.json") == "rate 3.14 config.json"
+    assert draft_anchor("rate 3.14") == "rate 3.14"
+    assert draft_anchor("rate 3.14 config.json") == " config.json"
     assert draft_anchor("请检查。") == "请检查。"
 
 
@@ -48,7 +49,9 @@ def test_invalid_or_copied_output_gets_only_one_repair(bad, repair_ok):
         return bad
     request = SuggestionRequest([Message("user", "刚才那段生成结果不合适。")], "我觉得")
     assert asyncio.run(complete_request(read, request)) == ("这里还可以更简洁。" if repair_ok else "")
-    assert len(calls) == 2 and calls[1]["background"] == []
+    assert len(calls) == 2
+    copied = "刚才那段生成结果不合适。" in bad
+    assert calls[1]["background"] == ([] if copied else calls[0]["background"])
 
 
 def test_generation_and_repair_share_one_total_deadline():
