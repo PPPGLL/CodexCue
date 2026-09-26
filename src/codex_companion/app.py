@@ -565,15 +565,26 @@ class InkComboBox(QComboBox):
         super().__init__()
         self.setObjectName("inkCombo")
         view = QListView(self)
+        view.viewport().setObjectName("inkComboViewport")
         view.setSpacing(2)
         view.setStyleSheet(
             "QListView {background:#FFFFFF;color:#26323B;"
             "border:1px solid #C6D0D4;border-radius:7px;padding:5px;outline:0;}"
-            "QListView::item {min-height:25px;padding:4px 9px;border-radius:4px;}"
+            "QWidget#inkComboViewport {background:#FFFFFF;}"
+            "QListView::item {background:#FFFFFF;min-height:25px;padding:4px 9px;border-radius:4px;}"
             "QListView::item:hover {background:#F1F4F5;}"
             "QListView::item:selected {background:#E8EEF0;color:#26323B;}"
         )
         self.setView(view)
+        # A combo's dropdown is a separate top-level QFrame. Give it and the
+        # scrolling viewport their own opaque surfaces, including row gaps and
+        # the area exposed while scrolling; the settings dialog cannot fill it.
+        popup = view.window()
+        popup.setObjectName("inkComboPopup")
+        popup.setStyleSheet("QFrame#inkComboPopup {background:#FFFFFF;border:0;}")
+        popup.setAttribute(Qt.WA_TranslucentBackground, False)
+        popup.setAttribute(Qt.WA_NoSystemBackground, False)
+        popup.setAutoFillBackground(True)
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
