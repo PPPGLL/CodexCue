@@ -326,6 +326,15 @@ def main(argv=None) -> int:
                 companion.toggle()
                 QTest.qWait(300)
                 check("live_model_waits_for_next_edit", not resident())
+                # The residency check deliberately idles for over a minute.
+                # Restore only our synthetic fixture before the final input;
+                # keep the foreground guard so no text reaches another app.
+                window.raise_()
+                window.activateWindow()
+                window.editor.setFocus()
+                wi.user32.SetForegroundWindow(target)
+                wait_for(app, lambda: wi.user32.GetForegroundWindow() == target,
+                         "fixture focus after idle (no input was sent elsewhere)", timeout=15)
                 type_draft("Please inspect the configu")
                 wait_for(app, lambda: companion.can_accept_tab(), "completion after manual release", timeout=90)
                 check("live_model_reloads_on_next_edit", resident() and companion.ready)
