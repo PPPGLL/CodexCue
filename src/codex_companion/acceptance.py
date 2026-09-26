@@ -447,11 +447,15 @@ def main(argv=None) -> int:
             # Reproduce a short popup becoming multiline before its entrance
             # ends. Read native physical window bounds against the real UIA
             # editor, including the frames after the obsolete animation ends.
+            # This direct popup probe bypasses suggestion state. Invalidate UIA
+            # callbacks so a late fallback read cannot hide its synthetic text.
+            companion.monitor.set_active(False)
             companion.invalidate()
             companion.text_armed = False
             editor_bounds = wi.read_draft()[1]
             popup = companion.popup
             samples = []
+            report["popup_geometry"] = {"editor": editor_bounds, "samples": samples}
             for initial, suggest in (("Loading model...", False), ("A short suggestion.", True)):
                 popup.hide()
                 popup.show_text(initial, editor_bounds, suggest=suggest)
