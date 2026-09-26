@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0b3 — 2026-09-26
+
 - Add release PR automation, consistent version checks, and immutable draft releases with matching source and Windows packages.
 - Fix completion not starting for external keyboard and Unicode input; accepting a suggestion no longer counts as new typing.
 
