@@ -24,6 +24,11 @@ def main() -> None:
         name = f'UIAutomationClient_VC140_{arch}.dll'
         ctypes.WinDLL(str(root / 'uiautomation' / 'bin' / name))
         print(f'loaded {name}')
+        tokenizer = list((root / 'tiktoken').glob('_tiktoken*.pyd'))
+        if len(tokenizer) != 1:
+            raise FileNotFoundError('Packaged tiktoken native extension is missing or ambiguous')
+        ctypes.WinDLL(str(tokenizer[0]))
+        print('loaded tiktoken native extension')
     finally:
         for handle in handles:
             handle.close()

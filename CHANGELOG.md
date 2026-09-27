@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Reuse selected conversation context while typing and avoid constructing unused prompts from the full history, reducing repeated work in long chats without shrinking the 16K window.
+- Preserve conversation context when switching tasks, even after large tool logs; reuse recent task history and show when a Codex task summary is included.
+- Prevent Ollama's GPU helper processes from opening terminal windows when switching models or quitting CodexCue.
+- Use a 16K context window with model-token budgeting, fuller recent conversations, and existing Codex task summaries; newer requests take precedence over older summaries.
+- Keep short factual continuations that reuse a detail from the conversation instead of unnecessarily discarding the context and retrying.
+- Evaluate completion meaning with offline, case-by-case Codex reviews; keyword and cursor hints no longer decide semantic pass/fail.
+- Focus suggestions on finishing your sentence or predicting the next one, without automatically turning rough thoughts into detailed plans or checklists.
+- Keep a usable continuation when the model copies the exact full draft instead of its short cursor anchor; strip the copied prefix before showing it.
+
 ## 0.1.0b4 — 2026-09-26
 
 - Keep the model dropdown opaque, including when repeatedly opening and closing it. Show the list immediately without Qt's temporary slide-animation window.

@@ -4,10 +4,10 @@ import json
 import re
 import time
 import unicodedata
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 Role = Literal["user", "assistant"]
 
@@ -16,6 +16,7 @@ Role = Literal["user", "assistant"]
 class Message:
     role: Role
     text: str
+    kind: Literal["dialogue", "task_summary"] = "dialogue"
 
 
 @dataclass(frozen=True)
@@ -430,83 +431,222 @@ def match_visible_session(visible_texts: list[str], infos: list[SessionInfo]) ->
     return scores[0][1]
 
 
+CONTEXT_RECORD_BYTES = 16 * 1024 * 1024
+CONTEXT_CHUNK_BYTES = 262_144
+CONTEXT_STORAGE_BYTES = 1024 * 1024
+
+
+class _ContextReadCancelled(Exception):
+    pass
+
+
+def _bounded_dialogue(message: Message, remaining: int) -> tuple[Message, int]:
+    data = message.text.encode("utf-8")
+    if len(data) > remaining:
+        message = replace(message, text=data[-remaining:].decode("utf-8", errors="ignore"))
+    return message, min(len(data), remaining)
+
+
+def _task_summary(record: dict | None) -> str | None:
+    """Only the explicit compaction message, never replacement/developer history."""
+    if not record or record.get("type") != "compacted":
+        return None
+    payload = record.get("payload")
+    text = payload.get("message") if isinstance(payload, dict) else None
+    if not isinstance(text, str) or len(text.encode("utf-8")) > CONTEXT_STORAGE_BYTES:
+        return ""
+    return text.strip()
+
+
+def recent_context(path: Path, end_at: int,
+                   cancelled: Callable[[], bool] = lambda: False) -> tuple[list[Message], str]:
+    """Read dialogue back to its compaction, independent of tool-log volume.
+
+    Bound stored text and individual records, not the total bytes scanned:
+    large tool outputs must not push otherwise useful dialogue out of context.
+    Token selection happens later using the selected model's own vocabulary.
+    """
+    found: list[Message] = []
+    summary = ""
+    size = 0
+    seen_compaction = False
+    with path.open("rb") as stream:
+        stream.seek(0, 2)
+        position = min(end_at, stream.tell())
+        remainder = b""
+        first = True
+        skip_partial = False
+        while position > 0:
+            if cancelled():
+                raise _ContextReadCancelled
+            width = min(CONTEXT_CHUNK_BYTES, position)
+            position -= width
+            stream.seek(position)
+            chunk = stream.read(width) + remainder
+            parts = chunk.split(b"\n")
+            remainder = parts.pop(0)
+            if first:
+                skip_partial = not chunk.endswith(b"\n")
+            if skip_partial and parts:
+                parts.pop()  # A writer may still be appending this record.
+                skip_partial = False
+            first = False
+            if position == 0 and remainder and not skip_partial:
+                parts.insert(0, remainder)
+            for raw in reversed(parts):
+                if len(raw) > CONTEXT_RECORD_BYTES:
+                    continue
+                record, message = parse_record(raw.decode("utf-8", errors="replace"))
+                compacted = _task_summary(record)
+                if compacted is not None:
+                    if not seen_compaction:
+                        seen_compaction = True
+                        summary = compacted
+                    if compacted:
+                        return list(reversed(found)), summary
+                if message and size < CONTEXT_STORAGE_BYTES:
+                    message, stored = _bounded_dialogue(message, CONTEXT_STORAGE_BYTES - size)
+                    found.append(message)
+                    size += stored
+            # Still scan for the latest summary after the dialogue buffer fills.
+            if len(remainder) > CONTEXT_RECORD_BYTES or skip_partial:
+                remainder = b""
+                skip_partial = True  # Skip the rest of this oversized/unfinished record.
+    return list(reversed(found)), summary
+
+
 class SessionTailer:
-    """Read appended complete JSONL records without touching tool/developer content."""
+    """Read dialogue plus compaction summaries off the input thread."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.offset = 0
         self.pending = b""
+        self.discard_pending = False
         self.messages: list[Message] = []
+        self.summary = ""
         self.revision = 0
         self.primed = False
+        self.file_id: tuple[int, int] | None = None
+        self.cancelled: Callable[[], bool] = lambda: False
 
     def poll(self) -> bool:
         try:
-            size = self.path.stat().st_size
-            if size < self.offset:
+            stat = self.path.stat()
+            size = stat.st_size
+            file_id = (stat.st_dev, stat.st_ino)
+            if size < self.offset or (self.file_id is not None and file_id != self.file_id):
                 self.offset = 0
                 self.pending = b""
+                self.discard_pending = False
                 self.messages.clear()
+                self.summary = ""
                 self.revision += 1
                 self.primed = False
+            self.file_id = file_id
             if not self.primed:
-                self.messages = recent_messages(self.path, limit=8, end_at=size)
+                self.messages, self.summary = recent_context(self.path, size, self.cancelled)
                 self.pending = b""
+                self.discard_pending = False
                 if size:
                     with self.path.open("rb") as stream:
-                        start = max(0, size - 262_144)
-                        stream.seek(start)
-                        tail = stream.read(size - start)
+                        start = size
+                        tail = b""
+                        # A compaction record can span several chunks because
+                        # it also contains replacement history. Keep its partial
+                        # bytes so completing it later still updates the summary.
+                        while start and len(tail) < CONTEXT_RECORD_BYTES:
+                            width = min(start, CONTEXT_CHUNK_BYTES, CONTEXT_RECORD_BYTES - len(tail))
+                            start -= width
+                            stream.seek(start)
+                            tail = stream.read(width) + tail
+                            if b"\n" in tail:
+                                break
                     if not tail.endswith(b"\n"):
                         partial = tail.rsplit(b"\n", 1)[-1]
                         if b"\n" in tail or start == 0:
                             self.pending = partial
+                        else:
+                            self.discard_pending = True
                 self.offset = size
                 self.primed = True
-                if self.messages:
+                if self.messages or self.summary:
                     self.revision += 1
-                return bool(self.messages)
+                return bool(self.messages or self.summary)
+        except (OSError, _ContextReadCancelled):
+            return False
+        changed = False
+        try:
             with self.path.open("rb") as stream:
                 stream.seek(self.offset)
-                chunk = stream.read()
-                self.offset = stream.tell()
+                # A cached task may have grown substantially while inactive.
+                # Process that snapshot in chunks rather than loading it all.
+                while self.offset < size:
+                    if self.cancelled():
+                        break
+                    chunk = stream.read(min(CONTEXT_CHUNK_BYTES, size - self.offset))
+                    if not chunk:
+                        break
+                    self.offset = stream.tell()
+                    lines = (self.pending + chunk).split(b"\n")
+                    self.pending = lines.pop()
+                    if self.discard_pending and lines:
+                        lines.pop(0)
+                        self.discard_pending = False
+                    if self.discard_pending or len(self.pending) > CONTEXT_RECORD_BYTES:
+                        self.pending = b""
+                        self.discard_pending = True
+                    added_messages = False
+                    for raw in lines:
+                        if len(raw) > CONTEXT_RECORD_BYTES:
+                            continue
+                        record, message = parse_record(raw.decode("utf-8", errors="replace"))
+                        summary = _task_summary(record)
+                        if summary is not None:
+                            self.summary = summary
+                            if summary:
+                                self.messages.clear()  # Earlier turns are represented by this snapshot.
+                            changed = True
+                        if message:
+                            self.messages.append(message)
+                            added_messages = True
+                            changed = True
+                    if added_messages:
+                        self._trim_messages()
         except OSError:
-            return False
-        if not chunk:
-            return False
-        lines = (self.pending + chunk).split(b"\n")
-        self.pending = lines.pop()
-        changed = False
-        for raw in lines:
-            _, message = parse_record(raw.decode("utf-8", errors="replace"))
-            if message:
-                self.messages.append(message)
-                changed = True
+            pass
         if changed:
             self.revision += 1
         return changed
 
-    def context(self, max_messages: int = 8, max_chars: int = 2200) -> list[Message]:
-        selected = self.messages[-max_messages:]
-        remaining = max_chars
-        result: list[Message] = []
-        for message in reversed(selected):
-            if remaining <= 0:
+    def _trim_messages(self) -> None:
+        stored = 0
+        for index in range(len(self.messages) - 1, -1, -1):
+            self.messages[index], used = _bounded_dialogue(
+                self.messages[index], CONTEXT_STORAGE_BYTES - stored)
+            stored += used
+            if stored >= CONTEXT_STORAGE_BYTES:
+                del self.messages[:index]
                 break
-            # One long final answer or pasted user message must not crowd out
-            # the rest of the recent exchange.
-            per_message = 420 if message.role == "user" else 260
-            limit = min(remaining, per_message)
-            text = message.text
-            if len(text) > limit:
-                if limit <= 8:
-                    text = text[-limit:]
-                else:
-                    marker = "\n[…]\n"
-                    head = (limit - len(marker)) // 3
-                    tail = limit - len(marker) - head
-                    text = text[:head] + marker + text[-tail:]
-            result.append(Message(message.role, text))
-            remaining -= len(text)
-        return list(reversed(result))
+
+    def context(self) -> list[Message]:
+        summary = [Message("assistant", self.summary, "task_summary")] if self.summary else []
+        return summary + self.messages[:]
+
+
+class SessionTailerCache:
+    """Keep recent task cursors in memory; only SessionPoller reads their logs."""
+
+    def __init__(self, capacity: int = 8) -> None:
+        self.capacity = max(1, capacity)
+        self.tailers: OrderedDict[Path, SessionTailer] = OrderedDict()
+
+    def get(self, path: Path) -> SessionTailer:
+        key = path.resolve()
+        tailer = self.tailers.pop(key, None)
+        if tailer is None:
+            tailer = SessionTailer(key)
+        self.tailers[key] = tailer
+        while len(self.tailers) > self.capacity:
+            self.tailers.popitem(last=False)
+        return tailer

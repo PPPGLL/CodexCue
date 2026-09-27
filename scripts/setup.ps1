@@ -149,7 +149,9 @@ if ($ollamaExe.StartsWith($ollamaDir, [StringComparison]::OrdinalIgnoreCase)) {
 }
 if (-not (Wait-Ollama)) {
     Say 'Starting Ollama on 127.0.0.1:11434.'
-    Start-Process -FilePath $ollamaExe -ArgumentList 'serve' -WindowStyle Hidden | Out-Null
+    # Keep a hidden console that Ollama's GPU probes can inherit. The service
+    # must not retain the application's install directory as its working dir.
+    Start-Process -FilePath $ollamaExe -ArgumentList 'serve' -WindowStyle Hidden -WorkingDirectory (Split-Path -Parent $ollamaExe) | Out-Null
     if (-not (Wait-Ollama)) { Fail 'Ollama did not start on 127.0.0.1:11434.' }
 }
 

@@ -1,0 +1,52 @@
+{
+  "mapping": {
+    "h01": {
+      "A": "before",
+      "B": "after"
+    },
+    "h02": {
+      "A": "before",
+      "B": "after"
+    },
+    "h03": {
+      "A": "before",
+      "B": "after"
+    },
+    "h04": {
+      "A": "before",
+      "B": "after"
+    },
+    "h05": {
+      "A": "before",
+      "B": "after"
+    },
+    "h06": {
+      "A": "before",
+      "B": "after"
+    },
+    "h07": {
+      "A": "before",
+      "B": "after"
+    },
+    "h08": {
+      "A": "before",
+      "B": "after"
+    },
+    "h09": {
+      "A": "before",
+      "B": "after"
+    },
+    "h10": {
+      "A": "before",
+      "B": "after"
+    },
+    "h11": {
+      "A": "before",
+      "B": "after"
+    },
+    "h12": {
+      "A": "before",
+      "B": "after"
+    }
+  }
+}

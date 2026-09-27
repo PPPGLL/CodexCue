@@ -36,7 +36,8 @@ def controller():
     companion.monitor = SimpleNamespace(generation=1, wake=lambda: None, set_active=lambda _: None)
     companion.tailer = SimpleNamespace(revision=1, poll=lambda: False)
     companion.context_revision = 1
-    from codex_companion.sessions import Message
+    from codex_companion.sessions import Message, SessionTailerCache
+    companion.session_tailers = SessionTailerCache()
     companion.context_messages = [Message("user", "Synthetic prior message")]
     companion.context_ready = True
     companion.context_verified = True
@@ -496,7 +497,8 @@ def test_switch_cannot_send_previous_task_context(monkeypatch, tmp_path):
 
     companion = controller()
     old_tailer = companion.tailer
-    companion.context_messages = [Message("assistant", "旧任务答复")]
+    companion.context_messages = [Message("assistant", "旧任务摘要", "task_summary"),
+                                  Message("assistant", "旧任务答复")]
     companion.state.observe("请继续", 1, 0)
     companion.backend = object()
     sent = []
@@ -512,7 +514,7 @@ def test_switch_cannot_send_previous_task_context(monkeypatch, tmp_path):
     assert not companion.context_ready
     assert companion.context_messages == []
     companion.start_request()
-    companion.on_context_changed(old_tailer, 9, [Message("assistant", "旧任务答复")])
+    companion.on_context_changed(old_tailer, 9, [Message("assistant", "旧任务摘要", "task_summary")])
     companion.start_request()
     assert sent == []
 
@@ -528,6 +530,74 @@ def test_switch_cannot_send_previous_task_context(monkeypatch, tmp_path):
     companion.on_observed(1, ("请继续", companion.bounds), 123, 0.0)
     companion.start_request()
     assert [message.text for message in sent[0].messages] == ["新任务问题", "新任务答复"]
+
+
+def test_switch_back_reuses_tailer_but_waits_for_fresh_worker_snapshot(monkeypatch, tmp_path):
+    from codex_companion import app as companion_app
+    from codex_companion.sessions import Message
+
+    companion = controller()
+    selected = []
+    companion.session_poller = SimpleNamespace(set_tailer=selected.append)
+    monkeypatch.setattr(companion_app, "default_sessions_root", lambda: tmp_path)
+    paths = [tmp_path / f"task-{i}.jsonl" for i in range(2)]
+    for path in paths:
+        path.touch()
+    companion._bind_resolved_session(paths[0])
+    first = companion.tailer
+    first.messages = [Message("user", "Task zero")]
+    first.revision = 2
+    companion.on_context_changed(first, 2, first.context())
+    companion._bind_resolved_session(paths[1])
+    second = companion.tailer
+    companion._bind_resolved_session(paths[0])
+    assert companion.tailer is first
+    assert not companion.context_ready
+    assert companion.context_messages == []
+    companion.on_context_changed(second, 3, [Message("user", "Task one")])
+    assert companion.context_messages == []
+    companion.on_context_changed(first, 3, [Message("user", "Updated task zero")])
+    assert companion.context_messages == [Message("user", "Updated task zero")]
+    assert selected == [first, second, first]
+
+def test_verified_task_can_use_summary_immediately_after_compaction():
+    from codex_companion.sessions import Message
+    companion = controller()
+    companion.context_messages = [Message("assistant", "当前任务的目标与约束", "task_summary")]
+    assert companion.completion_context() == companion.context_messages
+    companion.context_verified = False
+    assert companion.completion_context() == []
+
+
+def test_old_queued_snapshot_is_ignored_after_returning_to_same_task():
+    from codex_companion.sessions import Message
+    companion = controller()
+    companion.session_poller = SimpleNamespace(generation=3)
+    companion.context_ready = False
+    companion.context_messages = []
+    companion.on_context_changed(companion.tailer, 2, [Message("user", "Old snapshot")], 1)
+    assert not companion.context_ready
+    companion.on_context_changed(companion.tailer, 3, [Message("user", "Fresh snapshot")], 3)
+    assert companion.context_messages == [Message("user", "Fresh snapshot")]
+
+
+@pytest.mark.parametrize("locale,label", [
+    ("zh-CN", "任务摘要 + 近期消息：用户 0 / 助手 0"),
+    ("en-US", "Task summary + recent messages: user 0 / assistant 0"),
+])
+def test_summary_only_context_is_explained_in_tray(monkeypatch, locale, label):
+    from codex_companion import i18n
+    from codex_companion.sessions import Message
+    monkeypatch.setattr(i18n, "system_ui_languages", lambda: [locale])
+    companion = controller()
+    companion.active_context_label = "Synthetic task"
+    companion.context_messages = [Message("assistant", "Earlier work", "task_summary")]
+    companion.menu = QMenu()
+    tooltips = []
+    companion.tray = SimpleNamespace(setToolTip=tooltips.append)
+    Companion.refresh_menu(companion)
+    assert label in [a.text() for a in companion.menu.actions()]
+    assert label in tooltips[-1]
 
 
 def test_auto_mode_blocks_suggestions_until_visible_task_matches(monkeypatch):

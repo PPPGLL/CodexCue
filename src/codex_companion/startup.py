@@ -1,4 +1,4 @@
-"""Keep a hidden launcher from making every Qt window invisible on Windows."""
+"""Windows launch behavior for GUI windows and background console services."""
 from __future__ import annotations
 
 import ctypes
@@ -35,6 +35,19 @@ def command(arguments: list[str]) -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, *arguments]
     return [sys.executable, "-m", "codex_companion", *arguments]
+
+
+def hidden_console_options() -> dict:
+    """Give a console service a hidden console its subprocesses can inherit.
+
+    CREATE_NO_WINDOW leaves Ollama without a console. Its GPU probes then
+    allocate visible consoles of their own during model loading/unloading.
+    These flags are for the service only; Qt still needs normalize_startup().
+    """
+    info = subprocess.STARTUPINFO()
+    info.dwFlags = subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 0  # SW_HIDE
+    return {"startupinfo": info, "creationflags": subprocess.CREATE_NEW_CONSOLE}
 
 
 def normalize_startup() -> int | None:

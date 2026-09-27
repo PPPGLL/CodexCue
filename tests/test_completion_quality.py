@@ -28,6 +28,31 @@ def test_real_content_and_cursor_spacing_are_preserved(draft, suffix):
     assert decode_suggestion(raw, draft) == suffix
 
 
+@pytest.mark.parametrize("draft,suffix", [
+    ("Would changing the font help with readability?", " I'd like to compare them."),
+    ("第一部分已经确定了。第二部分我还想再考虑一下。", "明天再讨论吧。"),
+    ("相同的开头。相同的开头。", "继续看看。"),
+])
+def test_exact_full_draft_echo_keeps_only_new_words_without_retry(draft, suffix):
+    calls = []
+    async def read(messages, _schema, _budget):
+        calls.append(messages)
+        return json.dumps({"continuation": draft + suffix})
+    assert asyncio.run(complete_request(read, SuggestionRequest([], draft))) == suffix
+    assert len(calls) == 1
+    assert decode_suggestion(json.dumps({"continuation": draft}), draft) == ""
+
+
+@pytest.mark.parametrize("prefix", [
+    "Would changing the font improve readability?",  # Paraphrased prefix.
+    "Changing the font help with readability?",  # Part of the draft was dropped.
+])
+def test_full_draft_fallback_does_not_accept_a_rewritten_prefix(prefix):
+    with pytest.raises(ValueError, match="changed the existing draft"):
+        decode_suggestion(json.dumps({"continuation": prefix + " I'd like to compare them."}),
+                          "Would changing the font help with readability?")
+
+
 @pytest.mark.parametrize("repaired", [False, True])
 def test_punctuation_repair_keeps_task_facts_and_is_bounded(repaired):
     calls = []
@@ -75,11 +100,28 @@ def test_benchmark_penalizes_missing_output_and_includes_its_latency():
              "attempts": [], "checks": bench.assess(case, suffix)}
             for case, suffix, ms, attempts in zip(cases, ["。下一步", ""], [200, 8000], [1, 2])]
     summary = bench.summarize(rows)
-    assert summary["case_pass_rate"] == 0
+    assert summary["case_pass_rate"] == .5  # Cursor fluency requires semantic review.
+    assert bench.diagnostic_signals(cases[0], rows[0]["suffix"])["boundary_at_cursor"]
     assert summary["backend_ms"]["p95"] == 8000
     assert summary["backend_ms_shown"]["n"] == 1
     assert summary["retry_rate"] == .5
     assert not bench.assess(cases[0], ".")["substantive"]
+
+
+def test_keyword_signals_cannot_pass_or_fail_semantic_quality():
+    bench = benchmark_module()
+    case = {"draft": "先聊聊。", "contains_any": [["流程"]], "forbidden": ["新增"]}
+    suffix = "不需要新增功能。"
+    assert all(bench.assess(case, suffix).values())
+    signals = bench.diagnostic_signals(case, suffix)
+    assert not signals["expected_terms_present"]
+    assert signals["flagged_terms_present"]
+    # A user's own intention is not necessarily an assistant reply.
+    assert all(bench.assess({"draft": "That's enough. "}, "I will try it tomorrow.").values())
+    # Both 'simple' and 'simpler' are valid; a fixed expected prefix is only a hint.
+    word = {"draft": "I prefer a simpl", "starts_with": "er"}
+    assert all(bench.assess(word, "e version.").values())
+    assert not bench.diagnostic_signals(word, "e version.")["expected_prefix_present"]
 
 
 def test_benchmark_freezes_disjoint_cases_and_covers_context_changes():
@@ -92,6 +134,22 @@ def test_benchmark_freezes_disjoint_cases_and_covers_context_changes():
     paired = [c for c in cases if c["category"] == "context"]
     assert len(paired) >= 8
     assert all("messages" in c and "contains_any" in c for c in paired)
+
+
+def test_sentence_prediction_cases_are_separate_from_examples_and_regressions():
+    from codex_companion.completion_prompt import EXAMPLES
+    root = Path(__file__).resolve().parents[1]
+    cases = json.loads((root / "benchmarks/sentence-prediction-v1.json").read_text(encoding="utf-8"))["cases"]
+    old = json.loads(benchmark_module().DATASET.read_text(encoding="utf-8"))["cases"]
+    assert len({c["id"] for c in cases}) == len(cases) == 24
+    assert not {c["draft"] for c in cases} & ({e[1] for e in EXAMPLES} | {c["draft"] for c in old})
+    for split in ("dev", "holdout"):
+        selected = [c for c in cases if c["split"] == split]
+        assert len(selected) == 12
+        assert {"half_sentence", "word", "next_sentence", "question", "rough_request",
+                "explicit_plan", "context", "vague", "injection", "multi_tab", "everyday",
+                "constraint"} == {c["category"] for c in selected}
+        assert all(c["review_expectation"] for c in selected)
 
 
 def test_review_scoring_counts_preferences_and_rejects_incomplete_reviews():

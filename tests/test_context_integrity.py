@@ -72,7 +72,7 @@ def test_only_typed_user_and_final_assistant_turns_reach_the_model(tmp_path):
                 Message("user", "继续调整")]
     tailer = SessionTailer(path)
     assert tailer.poll()
-    assert tailer.context(max_messages=6, max_chars=1200) == expected
+    assert tailer.context() == expected
     assert recent_messages(path, limit=6) == expected
     assert describe_session(path, with_recent=True).recent_texts == tuple(
         message.text for message in expected)
@@ -117,7 +117,7 @@ def test_user_envelope_cleanup_keeps_ordinary_quoted_text(tmp_path):
                                 Message("user", "请补全这一句")]
 
 
-def test_initial_tailer_reads_only_recent_turns_and_preserves_partial_record(tmp_path):
+def test_initial_tailer_keeps_full_turns_and_preserves_partial_record(tmp_path):
     path = tmp_path / "rollout-large.jsonl"
     records = [{"type": "session_meta", "payload": {"id": "large"}}]
     records.extend(_record("user", f"用户消息{i}") for i in range(40))
@@ -130,7 +130,7 @@ def test_initial_tailer_reads_only_recent_turns_and_preserves_partial_record(tmp
 
     tailer = SessionTailer(path)
     assert tailer.poll()
-    assert len(tailer.messages) == 8
+    assert len(tailer.messages) == 40
     assert tailer.messages[-1] == Message("user", "用户消息39")
     with path.open("ab") as stream:
         stream.write(partial[30:] + b"\n")

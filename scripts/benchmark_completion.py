@@ -38,27 +38,32 @@ def assess(case: dict, suffix: str, error: str | None = None) -> dict[str, bool]
         return {"no_error": error is None, "empty_input_silent": not suffix}
     checks = {"no_error": error is None, "nonempty": bool(suffix.strip()),
               "substantive": any(c.isalnum() for c in suffix),
-              "user_voice": not bool(re.search(
-                  r"^(?:\s|[。.!！])*?(?:好的[，,]|我会|我来帮|当然可以|Sure[,!]|I will|Yes[,!]|No[,!])",
-                  suffix, re.I)),
               "no_protocol": not bool(re.search(r'"continuation"|<\||<｜|<fim_|<file_sep>|<think>|\banchor\b|(?:Background|User|Assistant):', suffix)),
               "length": case.get("min_chars", 1) <= len(suffix) <= case.get("max_chars", 220)}
-    if case.get("no_boundary_start"):
-        punctuation = r"[.;:!?。；：！？]" if case.get("allow_comma") else r"[,.;:!?，。；：！？]"
-        checks["cursor_join"] = bool(suffix) and not bool(re.match(r"\s*" + punctuation, suffix))
-    if "starts_with" in case:
-        checks["cursor_join"] = suffix.startswith(case["starts_with"])
-    if "contains_any" in case:
-        checks["context_or_topic"] = all(any(w.casefold() in suffix.casefold() for w in words)
-                                           for words in case["contains_any"])
-    if "forbidden" in case:
-        checks["constraints"] = not any(w.casefold() in suffix.casefold() for w in case["forbidden"])
     compact = lambda text: re.sub(r"[\W_]+", "", text.casefold())
     candidate = compact(suffix)
     # Entire copied fragments, not normal shared nouns or a correct fact.
     checks["no_verbatim_repeat"] = not (len(candidate) >= 14 and any(
         candidate in compact(text) for text in [case["draft"], *(m[1] for m in case.get("messages", []))]))
     return checks
+
+
+def diagnostic_signals(case: dict, suffix: str) -> dict[str, bool]:
+    """Search hints for review, never pass/fail judgments about meaning."""
+    signals = {"assistant_like_opening": bool(re.search(
+        r"^(?:\s|[。.!！])*?(?:好的[，,]|我会|我来帮|当然可以|Sure[,!]|I will|Yes[,!]|No[,!])",
+        suffix, re.I))}
+    if "contains_any" in case:
+        signals["expected_terms_present"] = all(any(w.casefold() in suffix.casefold() for w in words)
+                                                  for words in case["contains_any"])
+    if "forbidden" in case:
+        signals["flagged_terms_present"] = any(w.casefold() in suffix.casefold() for w in case["forbidden"])
+    if case.get("no_boundary_start"):
+        punctuation = r"[.;:!?。；：！？]" if case.get("allow_comma") else r"[,.;:!?，。；：！？]"
+        signals["boundary_at_cursor"] = bool(re.match(r"\s*" + punctuation, suffix))
+    if "starts_with" in case:
+        signals["expected_prefix_present"] = suffix.startswith(case["starts_with"])
+    return signals
 
 
 def percentiles(values: list[float]) -> dict:
@@ -114,7 +119,7 @@ def run(args, root: Path) -> dict:
     from codex_companion import model
     from codex_companion import state
     from codex_companion.sessions import Message
-    data_bytes = DATASET.read_bytes()
+    data_bytes = args.dataset.read_bytes()
     cases = json.loads(data_bytes)["cases"]
     cases = [c for c in cases if args.split == "all" or c["split"] == args.split]
     quiet_ms = getattr(state, "KEYBOARD_QUIET_SECONDS", .3) * 1000
@@ -137,8 +142,9 @@ def run(args, root: Path) -> dict:
                 try:
                     text = json.loads(raw)["continuation"]
                     anchor = model.draft_anchor(request.draft)
-                    if isinstance(text, str) and text.startswith(anchor):
-                        text = text[len(anchor):]
+                    if isinstance(text, str) and (text.startswith(request.draft) or text.startswith(anchor)):
+                        prefix = request.draft if text.startswith(request.draft) else anchor
+                        text = text[len(prefix):]
                         attempt["empty"] = not text.strip()
                         attempt["punctuation_only"] = bool(text.strip()) and not any(c.isalnum() for c in text)
                 except (ValueError, KeyError, TypeError):
@@ -195,7 +201,9 @@ def run(args, root: Path) -> dict:
                        "combined": case["draft"] + suffix, "backend_ms": elapsed,
                        "estimated_trigger_plus_backend_ms": round(quiet_ms + elapsed, 2),
                        "generation_requests": len(attempts), "attempts": attempts,
-                       "checks": assess(case, suffix, error), "error": error}
+                       "checks": assess(case, suffix, error),
+                       "diagnostic_signals": diagnostic_signals(case, suffix),
+                       "semantic_review": "NOT_REVIEWED", "error": error}
                 row["checks"]["emitted_matches"] = emitted == ([suffix] if suffix else [])
                 rows.append(row)
                 print(f"{args.label} {case['id']} repeat={repeat + 1} "
@@ -223,6 +231,8 @@ def run(args, root: Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="qwen3:4b-instruct")
+    parser.add_argument("--dataset", type=Path, default=DATASET,
+                        help="Fixed synthetic cases to compare (defaults to the short-completion regression suite)")
     parser.add_argument("--url", default="http://127.0.0.1:11434")
     parser.add_argument("--ref", help="Read source from this local Git commit instead of the working tree")
     parser.add_argument("--split", choices=("dev", "holdout", "all"), default="all")

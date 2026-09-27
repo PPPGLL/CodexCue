@@ -7,6 +7,54 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
 
 
+def test_fast_switch_back_emits_fresh_snapshot_even_with_unchanged_history():
+    from PySide6.QtCore import Qt
+    from codex_companion.app import Bridge, SessionPoller
+
+    first_ready = threading.Event()
+    second_poll = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    snapshots = []
+
+    class Tailer:
+        revision = 1
+        polls = 0
+
+        def poll(self):
+            self.polls += 1
+            if self.polls == 2:
+                second_poll.set()
+                assert release.wait(2)
+            return False
+
+        def context(self):
+            return ["unchanged history"]
+
+    first, second = Tailer(), Tailer()
+    bridge = Bridge()
+
+    def observed(source, _revision, _messages, generation):
+        snapshots.append((source, generation))
+        (first_ready if generation == 1 else returned).set()
+
+    bridge.context_changed.connect(observed, Qt.DirectConnection)
+    poller = SessionPoller(bridge)
+    try:
+        poller.set_tailer(first)
+        assert first_ready.wait(2)
+        assert second_poll.wait(2)
+        poller.set_tailer(second)
+        poller.set_tailer(first)
+        release.set()
+        assert returned.wait(2)
+        assert snapshots == [(first, 1), (first, 3)]
+    finally:
+        release.set()
+        poller.stop()
+        poller.thread.join(timeout=2)
+
+
 def test_hook_signal_is_delivered_on_qt_thread():
     from PySide6.QtCore import QCoreApplication, QObject
     from codex_companion.app import Bridge
@@ -224,7 +272,7 @@ def test_session_poller_reads_context_off_ui_thread():
     tailer = Tailer()
     bridge = Bridge()
     bridge.context_changed.connect(
-        lambda source, revision, messages: (snapshots.append((source, revision, messages)), done.set()),
+        lambda source, revision, messages, _generation: (snapshots.append((source, revision, messages)), done.set()),
         Qt.DirectConnection)
     poller = SessionPoller(bridge)
     try:
