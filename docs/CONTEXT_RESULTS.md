@@ -46,3 +46,21 @@ The clean implementation commit is `3fc8c152ec9812a8c97f6f910df5db03f4b0b192`. I
 The exact package passed three synthetic desktop runs (52 checks each), one Qwen3 8B desktop/model run (48 checks), and three startup/settings runs (39 checks each, including initial settings). The new desktop fixture checks that a compaction summary reaches the model as background, excludes replacement history and stays out of other tasks. The packaged English partial-word example joined correctly in this fixture, while its greeting still sounded like an assistant; meaning remains distinct from mechanical acceptance.
 
 The native tiktoken library, package checksums, build provenance, license/source inventory and installer lifecycle checks passed. The verified full bundle replaced the local installation; a rollback bundle was retained and the configuration hash did not change. Readback confirmed Qwen3 8B resident at 16,384 tokens and about 7.0 GiB VRAM. This is a local development build; the public version and GitHub release were not changed.
+
+## Repeated history preparation, 2026-09-27
+
+After the task-switch fix (`af22da4`), long conversations exposed a separate cost: each completion normalized and selected the full stored history again. The backend also constructed an unfitted prompt that it immediately replaced. A backend-owned cache now reuses selection within the existing draft-token buckets. New messages, a different tokenizer or a different prompt family invalidate it; drafts and generated suggestions are never reused. The 16K window and selection priorities are unchanged.
+
+A synthetic case with 1,350 messages / 645,540 characters used the installed **Qwen3 4B Instruct** tokenizer and an in-memory HTTP transport. This isolates application processing from model inference and desktop input. Across one first request and four draft edits, the edit median fell from **641 ms to 5.2 ms**. First-request processing remained **639 / 607 ms**. A summary-based 14,053-character case fell from **4.0 to 1.9 ms** on edits. Before/after HTTP payloads and returned continuations were identical for all ten paired inputs.
+
+Separate direct Ollama measurements used synthetic conversation text, the same 16K allocation, and one changed-history request followed by three draft edits per row:
+
+| Prompt tokens reported by Ollama | Changed history | Draft-edit median |
+| --- | ---: | ---: |
+| 3,618–3,624 | 725 ms | 176 ms |
+| 7,707–7,713 | 887 ms | 193 ms |
+| 15,321–15,327 | 2,084 ms | 247 ms |
+
+The near-full changed-history request spent 1,476 ms evaluating the prompt; its edits spent 16–17 ms there. Thus context caching reduces repeated work but does not eliminate the initial cost of a different conversation. These twelve requests are a diagnostic, not a controlled latency distribution: output lengths vary, prefixes may be reused, and UIA/Qt and history preparation are excluded. They use a different model from the earlier 8B measurements above and do not measure completion quality.
+
+Regression coverage checks cached versus fresh selection across draft budgets, newer corrections, task changes, tokenizer changes and both chat/native prompt families. Runtime diagnostics now separate context preparation from Ollama prompt evaluation and generation using numeric timing fields only. Synthetic measurement scripts and receipts for this local run are under `.local/context-latency/`; real conversation text is not included in this document or the tests.

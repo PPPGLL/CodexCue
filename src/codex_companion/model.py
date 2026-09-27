@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Callable, Protocol
@@ -149,7 +150,37 @@ def build_native_prompt(request: SuggestionRequest, *, repair: bool = False) -> 
     return prompt + f"Background: {background(request.messages)}\nUser: {escape_native_input(request.draft)}"
 
 
-def fit_request(request: SuggestionRequest, counter: TokenCounter, *, native: bool = False) -> SuggestionRequest:
+class ContextSelectionCache:
+    """Reuse history selection while the draft stays in the same token bucket.
+
+    Owned by one backend, with only its current history and up to eight draft
+    budgets retained. Neither drafts nor generated continuations are cached.
+    """
+
+    def __init__(self) -> None:
+        self.source: tuple[Message, ...] | None = None
+        self.counter: TokenCounter | None = None
+        self.native = False
+        self.messages: list[Message] = []
+        self.full_tokens: int | None = None
+        self.selections: dict[int, tuple[Message, ...]] = {}
+
+    def bind(self, messages: list[Message], counter: TokenCounter, native: bool) -> None:
+        source = tuple(messages)
+        if source != self.source or counter is not self.counter or native != self.native:
+            self.source, self.counter, self.native = source, counter, native
+            self.messages = completion_background(messages)
+            self.full_tokens = None
+            self.selections.clear()
+
+    def remember(self, limit: int, messages: list[Message]) -> None:
+        if len(self.selections) >= 8:
+            del self.selections[next(iter(self.selections))]
+        self.selections[limit] = tuple(messages)
+
+
+def fit_request(request: SuggestionRequest, counter: TokenCounter, *, native: bool = False,
+                cache: ContextSelectionCache | None = None) -> SuggestionRequest:
     """Spend the model's token budget on recent dialogue and older task context.
 
     Keep original message order for prefix-cache reuse. Selection runs on the
@@ -163,7 +194,9 @@ def fit_request(request: SuggestionRequest, counter: TokenCounter, *, native: bo
             return counter.count(build_native_prompt(candidate)) + 128
         return counter.chat_tokens(build_messages(candidate))
 
-    messages = completion_background(request.messages)
+    cache = cache if cache is not None else ContextSelectionCache()
+    cache.bind(request.messages, counter, native)
+    messages = cache.messages
     empty = count(SuggestionRequest([], ""))
 
     def history_ceiling(draft):
@@ -175,8 +208,10 @@ def fit_request(request: SuggestionRequest, counter: TokenCounter, *, native: bo
 
     draft = request.draft
     limit = history_ceiling(draft)
-    if count(SuggestionRequest(messages, "")) <= limit:
-        return SuggestionRequest(messages, draft)
+    if cache.full_tokens is None:
+        cache.full_tokens = count(SuggestionRequest(messages, ""))
+    if cache.full_tokens <= limit:
+        return SuggestionRequest(messages[:], draft)
     # An exceptionally long pasted draft must leave room for its background.
     draft_budget = CONTEXT_TOKENS // 4 if messages else ceiling // 2
     draft = counter.clip(request.draft, draft_budget, tail=True)
@@ -193,6 +228,9 @@ def fit_request(request: SuggestionRequest, counter: TokenCounter, *, native: bo
         # than their plain-text token count. Budget the serialized prompt too.
         draft = counter.clip(draft, max(1, counter.count(draft) // 2), tail=True)
         limit = history_ceiling(draft)
+
+    if limit in cache.selections:
+        return SuggestionRequest(list(cache.selections[limit]), draft)
 
     def add(index, limit):
         message = messages[index]
@@ -236,7 +274,9 @@ def fit_request(request: SuggestionRequest, counter: TokenCounter, *, native: bo
             add(index, limit)
             if count(candidate()) >= limit - 32:
                 break
-    return replace(candidate(), draft=draft)
+    fitted = replace(candidate(), draft=draft)
+    cache.remember(limit, fitted.messages)
+    return fitted
 
 
 def decode_native_suggestion(raw: str) -> str:
@@ -380,6 +420,7 @@ class OllamaBackend:
         self._active: set[threading.Event] = set()
         self._closed = False
         self.token_counter = TokenCounter()
+        self._context_cache = ContextSelectionCache()
         self._tokenizer_loaded = False
         # Never send localhost conversation data through HTTP(S)_PROXY.
         self.client = httpx.Client(
@@ -480,8 +521,10 @@ class OllamaBackend:
             return ""
         if self.completion_family:
             return self._suggest_native(request, emit, cancel)
+        # The stream receives the fitted prompt below. Constructing a prompt
+        # from all raw history here used to do expensive work only to discard it.
         payload = {"model": self.model, "stream": True, "keep_alive": -1,
-                   "think": False, "messages": build_messages(request), "format": continuation_schema(request.draft),
+                   "think": False,
                    "options": {"temperature": 0, "num_predict": COMPLETION_TOKENS, "num_ctx": CONTEXT_TOKENS,
                                "repeat_penalty": 1.0}}
         async def stream(messages, schema, budget):
@@ -499,10 +542,11 @@ class OllamaBackend:
                         chunk = json.loads(line)
                         raw += chunk.get("message", {}).get("content", "")
                         if chunk.get("done"):
+                            self._log_model_timing(chunk)
                             break
             return raw
         async def complete():
-            prepared = fit_request(request, self.token_counter)
+            prepared = self._prepare_request(request)
             return await complete_request(stream, prepared)
         final = self._operation(complete, cancel, self.request_timeout)
         if cancel.is_set() or not final:
@@ -511,15 +555,32 @@ class OllamaBackend:
             emit(final)
         return final
 
-    def _native_payload(self, request: SuggestionRequest, *, stream: bool = True) -> dict:
+    def _prepare_request(self, request: SuggestionRequest, *, native: bool = False) -> SuggestionRequest:
+        started = time.perf_counter()
+        prepared = fit_request(request, self.token_counter, native=native, cache=self._context_cache)
+        log_event("context_prepared", latency_ms=round((time.perf_counter() - started) * 1000),
+                  context_count=len(prepared.messages), context_chars=sum(len(m.text) for m in prepared.messages))
+        return prepared
+
+    @staticmethod
+    def _log_model_timing(chunk: dict) -> None:
+        # Record aggregate timing only, never the prompt or generated text.
+        metrics = {key: value for key, value in chunk.items()
+                   if isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+        log_event("model_timing", prompt_tokens=metrics.get("prompt_eval_count", 0),
+                  prompt_eval_ms=metrics.get("prompt_eval_duration", 0) // 1_000_000,
+                  generation_ms=metrics.get("eval_duration", 0) // 1_000_000,
+                  load_ms=metrics.get("load_duration", 0) // 1_000_000)
+
+    def _native_payload(self, request: SuggestionRequest | None, *, stream: bool = True) -> dict:
         return {"model": self.model, "stream": stream, "raw": True, "keep_alive": -1,
-                "prompt": build_native_prompt(request),
+                "prompt": build_native_prompt(request) if request is not None else "",
                 "options": {"temperature": 0, "num_predict": NATIVE_TOKENS,
                             "num_ctx": CONTEXT_TOKENS, "repeat_penalty": 1.0,
                             "stop": list(NATIVE_STOPS)}}
 
     def _suggest_native(self, request: SuggestionRequest, emit: Emit, cancel: threading.Event) -> str:
-        payload = self._native_payload(request)
+        payload = self._native_payload(None)
 
         async def stream(prompt, budget):
             raw = ""
@@ -536,12 +597,14 @@ class OllamaBackend:
                         if chunk.get("error"):
                             raise RuntimeError(chunk["error"])
                         raw += chunk.get("response", "")
+                        if chunk.get("done"):
+                            self._log_model_timing(chunk)
                         if chunk.get("done") or native_segment(raw) is not None:
                             break
             return raw
 
         async def complete():
-            prepared = fit_request(request, self.token_counter, native=True)
+            prepared = self._prepare_request(request, native=True)
             return await complete_native_request(stream, prepared)
         final = self._operation(complete, cancel, self.request_timeout)
         if cancel.is_set() or not final:

@@ -349,3 +349,88 @@ def test_warm_loads_tokenizer_once_and_typing_only_calls_chat():
         assert calls == ["/api/show", "/api/chat", "/api/chat", "/api/chat", "/api/chat"]
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_cached_selection_matches_fresh_selection_across_draft_budgets(native, monkeypatch):
+    messages = [Message("assistant", "Keep current controls. " * 1800, "task_summary"),
+                Message("user", "Older notes " * 3000),
+                Message("user", "Latest correction: only change spacing."),
+                Message("assistant", "Current state " * 2500)]
+    counter = TokenCounter()
+    cache = model.ContextSelectionCache()
+    normalizer = model.completion_background
+    scans = []
+
+    def observe(items):
+        if items is messages:
+            scans.append(True)
+        return normalizer(items)
+
+    monkeypatch.setattr(model, "completion_background", observe)
+    for draft in ("Please", "Please check", "x" * 400, "x" * 1000,
+                  "\x00" * 10000 + " final draft", "Please check again"):
+        request = model.SuggestionRequest(messages, draft)
+        fitted = model.fit_request(request, counter, native=native, cache=cache)
+        expected = model.fit_request(model.SuggestionRequest(messages[:], draft), counter, native=native)
+        assert fitted == expected
+        assert any("Latest correction" in m.text for m in fitted.messages)
+    assert len(scans) == 1  # Editing the draft never rescans the raw history.
+
+
+def test_selection_cache_invalidates_on_history_tokenizer_and_prompt_family_changes():
+    history = [Message("assistant", "Earlier goal. " * 1500, "task_summary"),
+               Message("user", "abab " * 6000), Message("user", "Use red.")]
+    cache = model.ContextSelectionCache()
+    fallback = TokenCounter()
+    vocabulary = TokenCounter.from_model_info(byte_vocabulary())
+    scenarios = [(history, fallback, False),
+                 (history[:-1] + [Message("user", "Correction: use blue.")], fallback, False),
+                 ([Message("assistant", "A different task summary", "task_summary")], fallback, False),
+                 (history, vocabulary, False), (history, vocabulary, True), (history, fallback, False)]
+    for messages, counter, native in scenarios:
+        request = model.SuggestionRequest(messages, "The current choice is")
+        assert model.fit_request(request, counter, native=native, cache=cache) == model.fit_request(
+            request, counter, native=native)
+
+
+def test_cached_selection_does_not_share_mutable_results_and_bounds_memory():
+    cache = model.ContextSelectionCache()
+    counter = TokenCounter()
+    messages = [Message("user", "Older material. " * 2500)]
+    for i in range(12):
+        request = model.SuggestionRequest(messages, "x" * (i * 256 + 1))
+        fitted = model.fit_request(request, counter, cache=cache)
+        expected = fitted.messages[:]
+        fitted.messages.clear()
+        assert model.fit_request(request, counter, cache=cache).messages == expected
+        assert len(cache.selections) <= 8
+    assert len(cache.selections) == 8
+    # The short-history path must not expose the cached list either.
+    request = model.SuggestionRequest([Message("user", "New task")], "Please")
+    model.fit_request(request, counter, cache=cache).messages.clear()
+    assert model.fit_request(request, counter, cache=cache).messages == request.messages
+
+
+@pytest.mark.parametrize("name", ["qwen3:4b-instruct", "starcoder2:3b"])
+def test_cancelled_operation_never_constructs_an_unused_history_prompt(monkeypatch, name):
+    backend = model.OllamaBackend("http://127.0.0.1:11434", name)
+    monkeypatch.setattr(backend, "_operation", lambda *_: "")
+    monkeypatch.setattr(model, "build_messages", lambda *_: pytest.fail("constructed an unused prompt"))
+    monkeypatch.setattr(model, "build_native_prompt", lambda *_: pytest.fail("constructed an unused prompt"))
+    try:
+        request = model.SuggestionRequest([Message("user", "Old notes " * 10000)], "Please")
+        assert backend.suggest(request, lambda _: None, threading.Event()) == ""
+    finally:
+        backend.close()
+
+
+def test_model_timing_diagnostics_only_include_numeric_metrics(monkeypatch):
+    logged = []
+    monkeypatch.setattr(model, "log_event", lambda event, **fields: logged.append((event, fields)))
+    model.OllamaBackend._log_model_timing({
+        "prompt_eval_count": 15800, "prompt_eval_duration": 123_000_000,
+        "eval_duration": 250_000_000, "load_duration": 3_000_000,
+        "message": {"content": "PRIVATE_GENERATED_TEXT"}, "prompt": "PRIVATE_DRAFT"})
+    assert logged == [("model_timing", {"prompt_tokens": 15800, "prompt_eval_ms": 123,
+                                        "generation_ms": 250, "load_ms": 3})]
